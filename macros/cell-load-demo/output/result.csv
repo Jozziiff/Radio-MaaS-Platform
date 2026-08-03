@@ -1,0 +1,11 @@
+cell_id,load_percent,status
+A1,42.5,ok
+A2,91.3,overload
+A3,67.0,ok
+A4,80.0,ok
+A5,95.8,overload
+A6,55.2,ok
+A7,73.4,ok
+A8,88.1,overload
+A9,60.0,ok
+A10,30.9,ok

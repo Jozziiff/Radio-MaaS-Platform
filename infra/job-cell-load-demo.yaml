@@ -1,0 +1,41 @@
+# M1: runs the cell-load-demo macro as a one-shot Kubernetes Job.
+#
+# A Job (not a Deployment) because a macro run is a single task that should
+# finish and stop, not a long-lived process Kubernetes should keep restarting
+# forever. imagePullPolicy: Never because the image was loaded straight into
+# the k3d node with `k3d image import` — there's no registry yet (that's a
+# later milestone), so the cluster must not try to pull it from anywhere.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cell-load-demo
+spec:
+  # No later milestone needs this Job to retry a failed pod on its own —
+  # investigate failures by hand for now, so keep this at 0.
+  backoffLimit: 0
+  template:
+    spec:
+      # A batch Job's pod runs once and exits; it must not be restarted
+      # in place (that's for long-running services), so Never rather than
+      # the Deployment-style Always/OnFailure.
+      restartPolicy: Never
+      containers:
+        - name: cell-load-demo
+          image: cell-load-demo:local
+          imagePullPolicy: Never
+          env:
+            - name: INPUT_PATH
+              value: /data/input.csv
+            - name: OUTPUT_PATH
+              value: /data/output.csv
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          # Same host path k3d mounted into every node at cluster-create time
+          # (`k3d cluster create ... --volume $(pwd)/data:/data`), so files
+          # written here are visible back on the host.
+          hostPath:
+            path: /data
+            type: Directory

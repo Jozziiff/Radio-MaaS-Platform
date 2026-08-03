@@ -1,0 +1,72 @@
+# M3: MinIO object storage, replacing the hostPath /data mount M1/M2 relied
+# on for macro input/output files.
+#
+# Deployment (not a Job) because MinIO is a long-lived service that should
+# keep running and be restarted if it crashes — the opposite of a macro run,
+# which is a single task that should finish and stop.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          env:
+            # Plainly temporary dev credentials. These move into Vault +
+            # External Secrets Operator in M4 — not before. Do not reuse
+            # these values anywhere real.
+            - name: MINIO_ROOT_USER
+              value: devadmin
+            - name: MINIO_ROOT_PASSWORD
+              value: devpassword123
+          ports:
+            - containerPort: 9000
+              name: api
+            - containerPort: 9001
+              name: console
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          # emptyDir: local-dev only. Storage lives only as long as the pod
+          # does -- a pod restart wipes it. Fine for M3 (proving MinIO works
+          # in-cluster); a real PVC is a later concern once this needs to
+          # actually persist data across restarts.
+          emptyDir: {}
+---
+# ClusterIP: only reachable from inside the cluster, at minio:9000 (API) /
+# minio:9001 (console) -- that's the point, other pods (macro Jobs, the
+# backend-api) are the intended clients, not the outside world. Reaching it
+# from the host for this verification step goes through kubectl
+# port-forward instead of changing the Service type.
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+spec:
+  type: ClusterIP
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001

@@ -12,6 +12,10 @@ simplicity: this only ever needs to run two CLI commands and check their
 exit codes, not manage build output streaming or the Docker Engine API
 directly. It assumes a k3d cluster named "radio-maas" already exists —
 creating one is out of scope here.
+
+M3: also writes the static MinIO wrapper (templates/wrapper.py) into the
+build context alongside the generated artifacts, since artifact_generator's
+Dockerfile now expects to `COPY wrapper.py .` and run it as the entrypoint.
 """
 
 import shutil
@@ -23,6 +27,7 @@ from artifact_generator import generate_artifacts
 from ast_engine import analyze
 
 K3D_CLUSTER_NAME = "radio-maas"
+_WRAPPER_TEMPLATE_PATH = Path(__file__).parent / "templates" / "wrapper.py"
 
 
 def build_and_import(
@@ -57,6 +62,7 @@ def build_and_import(
         (build_context / "Dockerfile").write_text(artifacts["Dockerfile"])
         (build_context / "requirements.txt").write_text(artifacts["requirements.txt"])
         (build_context / "macro.py").write_text(source_code)
+        shutil.copy(_WRAPPER_TEMPLATE_PATH, build_context / "wrapper.py")
 
         if sample_input_path is not None:
             shutil.copy(sample_input_path, build_context / "sample_input.csv")

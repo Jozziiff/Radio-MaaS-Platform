@@ -59,8 +59,27 @@ def test_writes_generated_artifacts_and_source_into_build_context():
         build_and_import("rtwp-anomaly-demo", SOURCE)
 
     assert "FROM python:3.11-slim" in captured["dockerfile"]
-    assert captured["requirements"] == "pandas\n"
+    assert captured["requirements"] == "pandas\nminio\n"
     assert captured["macro"] == SOURCE
+
+
+def test_writes_the_minio_wrapper_template_into_build_context():
+    wrapper_source = (
+        Path(__file__).parent / "templates" / "wrapper.py"
+    ).read_text()
+    captured = {}
+
+    def capture_build_dir(*args, **kwargs):
+        command = args[0]
+        if command[:2] == ["docker", "build"]:
+            build_dir = Path(command[-1])
+            captured["wrapper"] = (build_dir / "wrapper.py").read_text()
+        return _ok()
+
+    with patch("builder.subprocess.run", side_effect=capture_build_dir):
+        build_and_import("rtwp-anomaly-demo", SOURCE)
+
+    assert captured["wrapper"] == wrapper_source
 
 
 def test_docker_build_failure_raises_and_never_calls_k3d_import():

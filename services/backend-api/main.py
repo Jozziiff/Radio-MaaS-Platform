@@ -1,4 +1,4 @@
-"""backend-api (M2): programmatic trigger for macro executions.
+"""backend-api (M2, updated M3): programmatic trigger for macro executions.
 
 Replaces manually running `kubectl apply -f infra/job-cell-load-demo.yaml`
 with an HTTP API: POST an execution request and the service creates the
@@ -11,8 +11,14 @@ Also exposes the AST-based analysis engine (ast_engine.py, artifact_generator.py
 POST a raw macro script and get back its detected imports/columns plus the
 generated requirements.txt/Dockerfile/rules.yaml. And, via builder.py, an
 endpoint that goes one step further and actually builds + imports a runnable
-image from that analysis into the local k3d cluster — not wired into the
-/executions endpoints yet, that's a deliberate later step.
+image from that analysis into the local k3d cluster.
+
+M3: the Job manifest no longer mounts the M1/M2 hostPath /data volume at
+all. Instead it sets MinIO connection env vars on the container; the image's
+entrypoint is now the MinIO wrapper (templates/wrapper.py, wired in via
+artifact_generator.py/builder.py in M3), which fetches the macro's input
+from MinIO and uploads its output back — the Job itself no longer touches
+any host filesystem path.
 """
 
 import uuid
@@ -29,6 +35,15 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 JOB_NAMESPACE = "default"
+
+# MinIO connection details for macro Jobs. Same dev credentials as the
+# MinIO Deployment itself (infra/minio.yaml) -- these move into Vault +
+# External Secrets Operator in M4, not before.
+MINIO_ENDPOINT = "minio:9000"
+MINIO_ACCESS_KEY = "devadmin"
+MINIO_SECRET_KEY = "devpassword123"
+MINIO_INPUT_BUCKET = "radio-data"
+MINIO_OUTPUT_BUCKET = "macro-results"
 
 
 @asynccontextmanager
@@ -76,46 +91,44 @@ class MacroBuilt(BaseModel):
 def build_job_manifest(macro_name: str, job_name: str) -> k8s_client.V1Job:
     """Build a Job spec for any already-built macro, generalizing infra/job-cell-load-demo.yaml.
 
+    No volume or volume mount is set at all -- M1/M2's hostPath /data mount
+    is gone entirely. The container's MinIO wrapper entrypoint fetches its
+    input and uploads its output over the network instead, so the Job has
+    no dependency on the node's filesystem.
+
     Args:
         macro_name: Identifies which macro to run. Selects the image
             ("{macro_name}:generated", the tag `build_and_import` produces)
-            and the per-macro data subdirectory, so different macros'
-            input/output files don't collide under the shared /data mount.
+            and the per-macro object keys in MinIO, so different macros'
+            input/output objects don't collide in the shared buckets.
         job_name: Unique name for this Job (callers must ensure uniqueness,
             since Kubernetes Job names must be unique within a namespace).
 
     Returns:
         A V1Job ready to be created via the Kubernetes API.
     """
-    macro_data_dir = f"/data/{macro_name}"
     container = k8s_client.V1Container(
         name=macro_name,
         image=f"{macro_name}:generated",
         image_pull_policy="Never",
         env=[
+            k8s_client.V1EnvVar(name="MINIO_ENDPOINT", value=MINIO_ENDPOINT),
+            k8s_client.V1EnvVar(name="MINIO_ACCESS_KEY", value=MINIO_ACCESS_KEY),
+            k8s_client.V1EnvVar(name="MINIO_SECRET_KEY", value=MINIO_SECRET_KEY),
+            k8s_client.V1EnvVar(name="MINIO_INPUT_BUCKET", value=MINIO_INPUT_BUCKET),
             k8s_client.V1EnvVar(
-                name="INPUT_PATH", value=f"{macro_data_dir}/input.csv"
+                name="MINIO_INPUT_KEY", value=f"{macro_name}/input.csv"
             ),
+            k8s_client.V1EnvVar(name="MINIO_OUTPUT_BUCKET", value=MINIO_OUTPUT_BUCKET),
             k8s_client.V1EnvVar(
-                name="OUTPUT_PATH", value=f"{macro_data_dir}/output.csv"
+                name="MINIO_OUTPUT_KEY", value=f"{macro_name}/output.csv"
             ),
-        ],
-        volume_mounts=[
-            k8s_client.V1VolumeMount(name="data", mount_path="/data"),
         ],
     )
 
     pod_spec = k8s_client.V1PodSpec(
         restart_policy="Never",
         containers=[container],
-        volumes=[
-            k8s_client.V1Volume(
-                name="data",
-                host_path=k8s_client.V1HostPathVolumeSource(
-                    path="/data", type="Directory"
-                ),
-            ),
-        ],
     )
 
     return k8s_client.V1Job(

@@ -30,12 +30,24 @@ hardcoded/env-var placeholders -- they're read from Vault once at startup
 module-level MINIO_ACCESS_KEY/MINIO_SECRET_KEY below. Only the first few
 characters of each secret are ever logged, to confirm loading succeeded
 without printing the actual value anywhere.
+
+Also adds three endpoints closing the gap between what the API could do
+and what a UI needs: GET /macros (list what's been built), POST
+/macros/{name}/input (upload a macro's input CSV straight into MinIO), and
+GET /executions/{job_name}/result (download a finished execution's output
+CSV). These read/write MinIO directly from backend-api itself, not just
+via the wrapper.py template running inside a Job -- the first time this
+service talks to MinIO's API rather than only setting env vars for a Job
+to use.
 """
 
+import io
 import logging
+import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from ast_engine import analyze
 from artifact_generator import generate_artifacts
@@ -48,9 +60,12 @@ from auth import (
     verify_password,
 )
 from builder import build_and_import
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
+from minio import Minio
+from minio.error import S3Error
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from vault_client import get_jwt_secret, get_minio_credentials
@@ -68,20 +83,60 @@ JOB_NAMESPACE = "default"
 
 # Non-secret MinIO config -- endpoint address and bucket names aren't
 # credentials, so they stay as plain constants rather than going through
-# Vault. MINIO_ACCESS_KEY/MINIO_SECRET_KEY are the actual secrets: set
-# once at startup below from Vault, None beforehand so a Job built before
-# startup finishes loading them fails loudly instead of using a wrong
-# value.
-MINIO_ENDPOINT = "minio:9000"
+# Vault.
+#
+# Two separate endpoint constants, deliberately not one: JOB_MINIO_ENDPOINT
+# is always the in-cluster Service DNS name -- it's baked into every Job's
+# env vars by build_job_manifest, and Jobs run inside the cluster, where
+# that name resolves. MINIO_ENDPOINT is what backend-api itself uses to
+# reach MinIO directly (upload_macro_input, get_execution_result), and
+# backend-api runs on the host -- "minio:9000" doesn't resolve there, so
+# this one is overridable via env var (e.g. MINIO_ENDPOINT=localhost:9000
+# with a `kubectl port-forward svc/minio 9000:9000` running). Collapsing
+# these into one constant would mean overriding it for the host process
+# also breaks every future Job, which needs the real in-cluster name.
+#
+# MINIO_ACCESS_KEY/MINIO_SECRET_KEY are the actual secrets: set once at
+# startup below from Vault, None beforehand so a Job built before startup
+# finishes loading them fails loudly instead of using a wrong value.
+JOB_MINIO_ENDPOINT = "minio:9000"
+MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", JOB_MINIO_ENDPOINT)
 MINIO_ACCESS_KEY: str | None = None
 MINIO_SECRET_KEY: str | None = None
 MINIO_INPUT_BUCKET = "radio-data"
 MINIO_OUTPUT_BUCKET = "macro-results"
 
+# In-memory macro registry -- a plain dict, not a real database. Deliberate
+# simplification: this is lost on every restart. It's basically a tiny
+# stand-in for the audit log the original PFE report kept in SQLite --
+# enough to answer "what's been built" and "which macro did this job run"
+# for a demo, not a real datastore. Worth replacing with one once this
+# needs to survive a restart or be queried for anything beyond that.
+BUILT_MACROS: dict[str, dict[str, str]] = {}
+JOB_TO_MACRO: dict[str, str] = {}
+
 
 def _mask(secret: str) -> str:
     """First 4 characters of a secret, for confirming it loaded without logging it."""
     return secret[:4] + "..."
+
+
+def build_minio_client() -> Minio:
+    """Build a MinIO client from the module-level endpoint/credentials.
+
+    Mirrors templates/wrapper.py's build_minio_client() -- same client,
+    same `secure=False` reasoning (the in-cluster MinIO Service has no TLS
+    termination in front of it). This is backend-api's own copy rather than
+    an import from the template, since templates/wrapper.py is copied
+    verbatim into generated macro images and isn't meant to be imported as
+    a shared library.
+    """
+    return Minio(
+        MINIO_ENDPOINT,
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        secure=False,
+    )
 
 
 @asynccontextmanager
@@ -153,6 +208,21 @@ class LoginResponse(BaseModel):
     access_token: str
 
 
+class BuiltMacro(BaseModel):
+    """One entry in the GET /macros registry listing."""
+
+    macro_name: str
+    image_tag: str
+    built_at: str
+
+
+class InputUploaded(BaseModel):
+    """Response body for a successful macro input upload."""
+
+    macro_name: str
+    object_key: str
+
+
 def build_job_manifest(macro_name: str, job_name: str) -> k8s_client.V1Job:
     """Build a Job spec for any already-built macro, generalizing infra/job-cell-load-demo.yaml.
 
@@ -177,7 +247,7 @@ def build_job_manifest(macro_name: str, job_name: str) -> k8s_client.V1Job:
         image=f"{macro_name}:generated",
         image_pull_policy="Never",
         env=[
-            k8s_client.V1EnvVar(name="MINIO_ENDPOINT", value=MINIO_ENDPOINT),
+            k8s_client.V1EnvVar(name="MINIO_ENDPOINT", value=JOB_MINIO_ENDPOINT),
             k8s_client.V1EnvVar(name="MINIO_ACCESS_KEY", value=MINIO_ACCESS_KEY),
             k8s_client.V1EnvVar(name="MINIO_SECRET_KEY", value=MINIO_SECRET_KEY),
             k8s_client.V1EnvVar(name="MINIO_INPUT_BUCKET", value=MINIO_INPUT_BUCKET),
@@ -252,6 +322,8 @@ def create_execution(macro_name: str) -> ExecutionCreated:
     batch_api = k8s_client.BatchV1Api()
     batch_api.create_namespaced_job(namespace=JOB_NAMESPACE, body=job)
 
+    JOB_TO_MACRO[job_name] = macro_name
+
     return ExecutionCreated(job_name=job_name)
 
 
@@ -299,4 +371,76 @@ async def build_macro(macro_name: str, request: Request) -> MacroBuilt:
     analysis = analyze(source_code)
     artifacts = generate_artifacts(analysis)
     image_tag = await run_in_threadpool(build_and_import, macro_name, source_code)
+
+    BUILT_MACROS[macro_name] = {
+        "image_tag": image_tag,
+        "built_at": datetime.now(timezone.utc).isoformat(),
+    }
+
     return MacroBuilt(image_tag=image_tag, **analysis, artifacts=artifacts)
+
+
+@app.get(
+    "/macros",
+    response_model=list[BuiltMacro],
+    dependencies=[Depends(get_current_user)],
+)
+def list_macros() -> list[BuiltMacro]:
+    """List every macro built so far, from the in-memory registry."""
+    return [
+        BuiltMacro(macro_name=macro_name, **entry)
+        for macro_name, entry in BUILT_MACROS.items()
+    ]
+
+
+@app.post(
+    "/macros/{macro_name}/input",
+    response_model=InputUploaded,
+    dependencies=[Depends(get_current_user)],
+)
+async def upload_macro_input(macro_name: str, file: UploadFile) -> InputUploaded:
+    """Upload a macro's input CSV directly into MinIO, overwriting any prior input."""
+    object_key = f"{macro_name}/input.csv"
+    contents = await file.read()
+
+    client = build_minio_client()
+    client.put_object(
+        MINIO_INPUT_BUCKET,
+        object_key,
+        io.BytesIO(contents),
+        length=len(contents),
+    )
+
+    return InputUploaded(macro_name=macro_name, object_key=object_key)
+
+
+@app.get(
+    "/executions/{job_name}/result",
+    dependencies=[Depends(get_current_user)],
+)
+def get_execution_result(job_name: str) -> StreamingResponse:
+    """Download a finished execution's output CSV from MinIO.
+
+    404 if job_name was never recorded by create_execution (nothing in
+    JOB_TO_MACRO -- an unknown or mistyped job name), 409 if the macro is
+    known but its output object doesn't exist in MinIO yet (the execution
+    hasn't finished, or failed before uploading -- see
+    templates/wrapper.py's upload-only-on-success behavior).
+    """
+    macro_name = JOB_TO_MACRO.get(job_name)
+    if macro_name is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    object_key = f"{macro_name}/output.csv"
+    client = build_minio_client()
+    try:
+        response = client.get_object(MINIO_OUTPUT_BUCKET, object_key)
+    except S3Error as exc:
+        if exc.code == "NoSuchKey":
+            raise HTTPException(
+                status_code=409,
+                detail="execution has not produced a result yet",
+            ) from exc
+        raise
+
+    return StreamingResponse(response.stream(32 * 1024), media_type="text/csv")

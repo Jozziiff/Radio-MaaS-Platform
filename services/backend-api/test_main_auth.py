@@ -109,6 +109,30 @@ def test_analyze_requires_auth():
     assert response.status_code == 401
 
 
+def test_list_macros_requires_auth():
+    with TestClient(app) as client:
+        response = client.get("/macros")
+
+    assert response.status_code == 401
+
+
+def test_upload_macro_input_requires_auth():
+    with TestClient(app) as client:
+        response = client.post(
+            "/macros/rtwp-anomaly-demo/input",
+            files={"file": ("input.csv", b"a,b\n1,2\n", "text/csv")},
+        )
+
+    assert response.status_code == 401
+
+
+def test_get_execution_result_requires_auth():
+    with TestClient(app) as client:
+        response = client.get("/executions/some-job-name/result")
+
+    assert response.status_code == 401
+
+
 def test_analyze_succeeds_with_a_valid_token():
     with TestClient(app) as client:
         # Created only after entering the context, so the app's lifespan

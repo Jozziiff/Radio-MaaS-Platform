@@ -9,3 +9,7 @@ bcrypt==4.0.1
 # backend-api's own Vault client (vault_client.py). Not a generated-macro
 # dependency -- keep out of artifact_generator.py's requirements.txt.
 hvac
+# backend-api talks to MinIO directly now too (input upload, result
+# download) -- same library the generated wrapper.py template uses.
+minio
+python-multipart

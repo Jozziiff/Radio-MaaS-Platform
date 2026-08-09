@@ -1,0 +1,27 @@
+# M5: the actual GitOps wiring -- an ArgoCD Application that watches this
+# repo's infra/ directory and applies whatever it finds to the cluster,
+# instead of a human running `kubectl apply` by hand each time.
+#
+# automated + prune + selfHeal: ArgoCD doesn't just report drift, it
+# corrects it. `prune: true` deletes cluster resources whose manifest was
+# removed from infra/ (like job-cell-load-demo.yaml just was); `selfHeal:
+# true` reverts any manual in-cluster change back to match Git -- Git is
+# the single source of truth, not a suggestion.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: radio-maas-infra
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Jozziiff/Radio-MaaS-Platform.git
+    targetRevision: HEAD
+    path: infra
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -8,6 +8,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: minio
+  labels:
+    # M5 GitOps proof: a trivial, visible change pushed to Git to confirm
+    # ArgoCD's selfHeal/automated sync applies it without any manual
+    # kubectl command -- see docs/decisions/ for the M5 writeup.
+    demo: gitops-proof
 spec:
   replicas: 1
   selector:

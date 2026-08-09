@@ -13,7 +13,7 @@
   <img alt="Kubernetes" src="https://img.shields.io/badge/kubernetes-k3d-326CE5?logo=kubernetes&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/api-FastAPI-009688?logo=fastapi&logoColor=white">
   <img alt="MinIO" src="https://img.shields.io/badge/storage-MinIO-C72E49?logo=minio&logoColor=white">
-  <img alt="Milestone" src="https://img.shields.io/badge/milestone-M4%20done-success">
+  <img alt="Milestone" src="https://img.shields.io/badge/milestone-M5%20done-success">
   <img alt="Status" src="https://img.shields.io/badge/status-in%20development-yellow">
   <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue">
 </p>
@@ -336,8 +336,8 @@ per-directory rather than all together in one `pytest` invocation.
 | M2 — API + AST engine | ✅ done | FastAPI backend, automated build, script analysis |
 | M3 — object storage | ✅ done | MinIO in place of the hostPath `/data` mount |
 | M4 — auth + secrets | ✅ done | JWT authentication protecting every macro endpoint, backed by HashiCorp Vault |
-| M5 — GitOps | ▶ next | Gitea + ArgoCD, a real image registry |
-| M6 — observability | planned | Prometheus + Grafana |
+| M5 — GitOps | ✅ done | Gitea + ArgoCD, `infra/` synced automatically from Git (ArgoCD watches GitHub, not Gitea yet — see [M5-gitops.md](docs/decisions/M5-gitops.md)) |
+| M6 — observability | ▶ next | Prometheus + Grafana |
 
 Each milestone is documented in [`docs/decisions/`](docs/decisions/) before
 the next one starts — what was built, why, and what was deliberately left

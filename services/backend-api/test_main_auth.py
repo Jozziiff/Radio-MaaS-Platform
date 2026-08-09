@@ -1,14 +1,24 @@
-"""Tests for auth wiring on backend-api's endpoints (M4, updated M5). See main.py, auth.py."""
+"""Tests for auth wiring on backend-api's endpoints (M4, updated M6). See main.py, auth.py."""
 
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+import db
 from auth import create_token
 from main import app
 
 TEST_JWT_SECRET = "test-only-jwt-secret-for-main-auth-tests"
+
+
+@pytest.fixture(autouse=True)
+def temp_registry_db(tmp_path, monkeypatch):
+    """main.py's lifespan calls db.init_db() on every TestClient(app) startup
+    -- point it at a throwaway file so these auth-only tests never create or
+    touch the real registry.db.
+    """
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test_registry.db")
 
 
 @pytest.fixture(autouse=True)
@@ -77,8 +87,12 @@ def test_build_endpoint_requires_auth():
     with TestClient(app) as client:
         response = client.post(
             "/macros/rtwp-anomaly-demo/build",
-            content="import os\n",
-            headers={"Content-Type": "text/plain"},
+            json={
+                "display_name": "RTWP",
+                "description": "test",
+                "icon": "signal",
+                "source_code": "import os\n",
+            },
         )
 
     assert response.status_code == 401
@@ -112,6 +126,13 @@ def test_analyze_requires_auth():
 def test_list_macros_requires_auth():
     with TestClient(app) as client:
         response = client.get("/macros")
+
+    assert response.status_code == 401
+
+
+def test_delete_macro_requires_auth():
+    with TestClient(app) as client:
+        response = client.delete("/macros/rtwp-anomaly-demo")
 
     assert response.status_code == 401
 

@@ -1,5 +1,6 @@
-"""Tests for the backend-api service (M2, updated M5). See main.py for module purpose."""
+"""Tests for the backend-api service (M2, updated M6). See main.py for module purpose."""
 
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 from kubernetes import client as k8s_client
 from minio.error import S3Error
 
+import db
 import main
 from main import app, build_job_manifest, map_job_status
 
@@ -30,15 +32,35 @@ def minio_credentials_loaded():
 
 
 @pytest.fixture(autouse=True)
-def registries_cleared():
-    """The macro/job registries are module-level dicts -- reset between tests
-    so one test's build/execution can't leak into another's assertions.
+def registries_cleared(tmp_path, monkeypatch):
+    """The macro registry is a real SQLite file now (db.py) -- point it at a
+    fresh temp file per test, so one test's build/execution can't leak into
+    another's assertions and tests never touch the real registry.db.
+    JOB_TO_MACRO is still an in-memory dict (see main.py), reset the same way
+    as before.
     """
-    main.BUILT_MACROS.clear()
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test_registry.db")
+    db.init_db()
     main.JOB_TO_MACRO.clear()
     yield
-    main.BUILT_MACROS.clear()
     main.JOB_TO_MACRO.clear()
+
+
+def _upsert_macro(technical_name="rtwp-anomaly-demo", **overrides):
+    """Shorthand for seeding the registry directly, bypassing build_macro's
+    HTTP/build-pipeline path when a test only needs a row to already exist.
+    """
+    fields = {
+        "display_name": "RTWP Anomaly Detector",
+        "description": "Flags cells with high uplink noise.",
+        "icon": "signal",
+        "source_code": "import pandas as pd\n",
+        "image_tag": f"{technical_name}:generated",
+        "built_at": "2026-08-09T12:00:00+00:00",
+        "updated_at": "2026-08-09T12:00:00+00:00",
+    }
+    fields.update(overrides)
+    db.upsert_macro(technical_name, **fields)
 
 
 def _fake_s3_error(code: str) -> S3Error:
@@ -168,10 +190,7 @@ def test_list_macros_is_empty_before_anything_is_built():
 
 
 def test_list_macros_includes_a_macro_recorded_in_the_registry():
-    main.BUILT_MACROS["rtwp-anomaly-demo"] = {
-        "image_tag": "rtwp-anomaly-demo:generated",
-        "built_at": "2026-08-09T12:00:00+00:00",
-    }
+    _upsert_macro()
 
     with TestClient(app) as client:
         from auth import create_token
@@ -182,11 +201,147 @@ def test_list_macros_includes_a_macro_recorded_in_the_registry():
     assert response.status_code == 200
     assert response.json() == [
         {
-            "macro_name": "rtwp-anomaly-demo",
+            "technical_name": "rtwp-anomaly-demo",
+            "display_name": "RTWP Anomaly Detector",
+            "description": "Flags cells with high uplink noise.",
+            "icon": "signal",
             "image_tag": "rtwp-anomaly-demo:generated",
             "built_at": "2026-08-09T12:00:00+00:00",
+            "updated_at": "2026-08-09T12:00:00+00:00",
         }
     ]
+
+
+def test_list_macros_survives_a_fresh_testclient_instance():
+    """The registry is now a file on disk, not a process-lifetime dict --
+    confirms the actual bug being fixed: a macro recorded through one
+    TestClient/app lifecycle is still there for a completely new one,
+    the same way a real backend-api restart should no longer lose the
+    catalog. (Two `with TestClient(app) as client:` blocks each run
+    main.py's lifespan, same as two separate process starts would.)
+    """
+    _upsert_macro()
+
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        first_response = client.get("/macros", headers={"Authorization": f"Bearer {token}"})
+
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        second_response = client.get("/macros", headers={"Authorization": f"Bearer {token}"})
+
+    assert first_response.json() == second_response.json()
+    assert len(second_response.json()) == 1
+
+
+def test_get_macro_returns_404_for_an_unbuilt_macro():
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.get(
+            "/macros/never-built", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 404
+
+
+def test_get_macro_returns_the_full_record_including_source_code():
+    _upsert_macro(source_code="import os\nprint('hi')\n")
+
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.get(
+            "/macros/rtwp-anomaly-demo", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 200
+    assert response.json()["source_code"] == "import os\nprint('hi')\n"
+
+
+def test_build_macro_rejects_an_invalid_icon_with_400():
+    with (
+        patch("main.build_and_import", return_value="rtwp-anomaly-demo:generated"),
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/macros/rtwp-anomaly-demo/build",
+            json={
+                "display_name": "RTWP",
+                "description": "test",
+                "icon": "not-a-real-icon",
+                "source_code": "import pandas as pd\n",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 400
+
+
+def test_build_macro_upserts_full_metadata_into_the_registry():
+    with (
+        patch("main.build_and_import", return_value="rtwp-anomaly-demo:generated"),
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        build_response = client.post(
+            "/macros/rtwp-anomaly-demo/build",
+            json={
+                "display_name": "RTWP Anomaly Detector",
+                "description": "Flags cells with high uplink noise.",
+                "icon": "signal",
+                "source_code": "import pandas as pd\n",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        list_response = client.get("/macros", headers={"Authorization": f"Bearer {token}"})
+
+    assert build_response.status_code == 200
+    macros = list_response.json()
+    assert len(macros) == 1
+    assert macros[0]["display_name"] == "RTWP Anomaly Detector"
+    assert macros[0]["icon"] == "signal"
+
+
+def test_create_execution_returns_404_for_an_unbuilt_macro():
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/executions/never-built", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 404
+
+
+def test_create_execution_succeeds_for_a_built_macro():
+    _upsert_macro()
+
+    with (
+        patch("main.k8s_client.BatchV1Api") as mock_batch_api,
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/executions/rtwp-anomaly-demo", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 200
+    mock_batch_api.return_value.create_namespaced_job.assert_called_once()
 
 
 def test_upload_macro_input_writes_to_minio_and_confirms():
@@ -279,3 +434,66 @@ def test_get_execution_result_returns_csv_when_output_exists():
     mock_client.get_object.assert_called_once_with(
         "macro-results", "rtwp-anomaly-demo/output.csv"
     )
+
+
+def test_delete_macro_returns_404_for_an_unbuilt_macro():
+    with (
+        patch("main.subprocess.run") as mock_run,
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.delete(
+            "/macros/never-built", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 404
+    mock_run.assert_not_called()
+
+
+def test_delete_macro_removes_it_from_the_registry():
+    _upsert_macro()
+
+    with (
+        patch("main.subprocess.run") as mock_run,
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        delete_response = client.delete(
+            "/macros/rtwp-anomaly-demo", headers={"Authorization": f"Bearer {token}"}
+        )
+        list_response = client.get("/macros", headers={"Authorization": f"Bearer {token}"})
+
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"technical_name": "rtwp-anomaly-demo"}
+    assert list_response.json() == []
+    mock_run.assert_called_once()
+    assert mock_run.call_args.args[0] == ["docker", "rmi", "rtwp-anomaly-demo:generated"]
+
+
+def test_delete_macro_succeeds_even_if_docker_rmi_fails():
+    """The docker rmi is best-effort -- a failure there must not fail the
+    whole request, since the registry row (the source of truth for GET
+    /macros) is already gone either way.
+    """
+    _upsert_macro()
+
+    with (
+        patch(
+            "main.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, ["docker", "rmi"]),
+        ),
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.delete(
+            "/macros/rtwp-anomaly-demo", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 200
+    assert db.get_macro("rtwp-anomaly-demo") is None

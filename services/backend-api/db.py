@@ -1,0 +1,150 @@
+"""Macro registry database (M6): SQLite storage for built macros.
+
+Replaces main.py's in-memory BUILT_MACROS dict, which lost every entry on
+restart -- exactly the bug this fixes (GET /macros returning empty after
+any restart, even though images built in a prior process were still sitting
+in the cluster). SQLite is a single file (registry.db, gitignored -- this is
+local runtime state, not something to commit), created on first use via
+init_db(), no separate database service to stand up.
+
+Deliberately still a simplification, not a production datastore: no
+migrations framework (init_db()'s CREATE TABLE IF NOT EXISTS is the entire
+schema story), no connection pooling (a new sqlite3.connect() per call --
+SQLite handles that fine at this scale), no concurrent-writer story beyond
+SQLite's own file locking. Worth revisiting if this ever needs to run as
+more than one backend-api process against the same file.
+"""
+
+import sqlite3
+from pathlib import Path
+
+DB_PATH = Path(__file__).parent / "registry.db"
+
+# Fixed set of lucide-react icon names a macro can be tagged with. Validated
+# against this list rather than accepting any string, so the frontend can
+# trust `icon` is always a real lucide-react component name without its own
+# defensive fallback.
+VALID_ICONS = {
+    "signal",
+    "activity",
+    "database",
+    "bar-chart",
+    "zap",
+    "radio",
+    "waves",
+    "gauge",
+}
+
+
+class InvalidIconError(ValueError):
+    """Raised when a macro's icon isn't one of db.VALID_ICONS."""
+
+
+def _connect() -> sqlite3.Connection:
+    """Open a connection with row access by column name, not just index."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    """Create the macros table if it doesn't already exist. Safe to call on every startup."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS macros (
+                technical_name TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                description TEXT,
+                icon TEXT NOT NULL,
+                source_code TEXT NOT NULL,
+                image_tag TEXT NOT NULL,
+                built_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+def upsert_macro(
+    technical_name: str,
+    display_name: str,
+    description: str | None,
+    icon: str,
+    source_code: str,
+    image_tag: str,
+    built_at: str,
+    updated_at: str,
+) -> None:
+    """Insert a new macro, or overwrite every field if technical_name already exists.
+
+    The same upsert covers both a first build and a rebuild -- a rebuild
+    (same technical_name, presumably different source_code) simply replaces
+    the row rather than needing separate insert/update code paths. Also
+    what a future "edit" endpoint will reuse.
+
+    Raises:
+        InvalidIconError: if icon isn't one of VALID_ICONS. Checked here
+            (not just at the API layer) so this function can't be called
+            with a bad icon from anywhere and silently store it.
+    """
+    if icon not in VALID_ICONS:
+        raise InvalidIconError(
+            f"'{icon}' is not a valid icon; must be one of {sorted(VALID_ICONS)}"
+        )
+
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO macros
+                (technical_name, display_name, description, icon, source_code,
+                 image_tag, built_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(technical_name) DO UPDATE SET
+                display_name = excluded.display_name,
+                description = excluded.description,
+                icon = excluded.icon,
+                source_code = excluded.source_code,
+                image_tag = excluded.image_tag,
+                built_at = excluded.built_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                technical_name,
+                display_name,
+                description,
+                icon,
+                source_code,
+                image_tag,
+                built_at,
+                updated_at,
+            ),
+        )
+
+
+def list_macros() -> list[sqlite3.Row]:
+    """All macros, ordered by most recently built first."""
+    with _connect() as conn:
+        return conn.execute("SELECT * FROM macros ORDER BY built_at DESC").fetchall()
+
+
+def get_macro(technical_name: str) -> sqlite3.Row | None:
+    """One macro's full record, or None if technical_name isn't in the registry."""
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT * FROM macros WHERE technical_name = ?", (technical_name,)
+        ).fetchone()
+
+
+def delete_macro(technical_name: str) -> bool:
+    """Delete one macro's row. Returns True if a row was actually deleted, False if it didn't exist.
+
+    Callers use the return value to decide whether to 404 -- this function
+    itself doesn't raise for an unknown technical_name, since "delete
+    something that's already gone" isn't a database-layer error.
+    """
+    with _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM macros WHERE technical_name = ?", (technical_name,)
+        )
+        return cursor.rowcount > 0

@@ -39,16 +39,35 @@ CSV). These read/write MinIO directly from backend-api itself, not just
 via the wrapper.py template running inside a Job -- the first time this
 service talks to MinIO's API rather than only setting env vars for a Job
 to use.
+
+M6: CORS enabled for the new services/frontend/ dev server (Vite, default
+port 5173). Scoped to that one localhost origin -- see the CORSMiddleware
+comment below for why this isn't the real deployment answer.
+
+M6 (continued): the in-memory BUILT_MACROS dict is gone -- built macros
+now live in a real SQLite database (db.py), so GET /macros survives a
+backend-api restart instead of going blank every time. POST
+/macros/{technical_name}/build's request body is now JSON (display_name,
+description, icon, source_code), not raw source text, to carry the extra
+metadata a catalog card needs. See db.py for the schema and
+docs/decisions/ for the write-up.
+
+M6 (continued): DELETE /macros/{technical_name} removes a macro's
+registry row and best-effort removes its local `docker` image -- see the
+endpoint's own docstring for why the k3d-imported copy is a known,
+accepted gap rather than something this also cleans up.
 """
 
 import io
 import logging
 import os
+import subprocess
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import db
 from ast_engine import analyze
 from artifact_generator import generate_artifacts
 from auth import (
@@ -60,7 +79,9 @@ from auth import (
     verify_password,
 )
 from builder import build_and_import
+from db import InvalidIconError
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
@@ -106,13 +127,14 @@ MINIO_SECRET_KEY: str | None = None
 MINIO_INPUT_BUCKET = "radio-data"
 MINIO_OUTPUT_BUCKET = "macro-results"
 
-# In-memory macro registry -- a plain dict, not a real database. Deliberate
-# simplification: this is lost on every restart. It's basically a tiny
-# stand-in for the audit log the original PFE report kept in SQLite --
-# enough to answer "what's been built" and "which macro did this job run"
-# for a demo, not a real datastore. Worth replacing with one once this
-# needs to survive a restart or be queried for anything beyond that.
-BUILT_MACROS: dict[str, dict[str, str]] = {}
+# Built macros live in SQLite now (db.py), not an in-memory dict -- see the
+# M6 (continued) module docstring note above.
+#
+# JOB_TO_MACRO is still in-memory, deliberately: unlike the macro registry,
+# losing it on restart only means an in-flight execution's result can't be
+# looked up by job_name after a restart, which is a much smaller and more
+# tolerable gap than "the whole macro catalog goes empty." Worth moving to
+# SQLite too if that gap ever actually matters.
 JOB_TO_MACRO: dict[str, str] = {}
 
 
@@ -145,6 +167,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global MINIO_ACCESS_KEY, MINIO_SECRET_KEY
 
     k8s_config.load_kube_config()
+    db.init_db()
 
     jwt_secret = get_jwt_secret()
     set_jwt_secret(jwt_secret)
@@ -161,6 +184,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="radio-maas-platform backend-api", lifespan=lifespan)
+
+# CORS: scoped to the Vite dev server's origin only (http://localhost:5173,
+# Vite's default port) -- this is a development convenience, not a real
+# deployment's answer. A real deployment would restrict this to whatever
+# origin the frontend is actually served from, not a wildcard and not a
+# hardcoded localhost port. allow_headers includes Authorization explicitly
+# since that's what carries the JWT on every protected request; allow_methods
+# covers GET/POST/DELETE (JSON bodies and multipart file uploads both need
+# POST, DELETE /macros/{technical_name} needs DELETE -- its browser
+# preflight (OPTIONS) was failing with a CORS error, surfacing to the
+# frontend as an opaque "failed to fetch", until DELETE was added here).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 class ExecutionCreated(BaseModel):
@@ -195,6 +236,20 @@ class MacroBuilt(BaseModel):
     artifacts: dict[str, str]
 
 
+class BuildMacroRequest(BaseModel):
+    """Request body for POST /macros/{technical_name}/build.
+
+    JSON, not the raw-source-as-plain-text-body the endpoint used before
+    display_name/description/icon existed -- those three fields need a
+    structured body alongside source_code.
+    """
+
+    display_name: str
+    description: str | None = None
+    icon: str
+    source_code: str
+
+
 class LoginRequest(BaseModel):
     """Request body for POST /auth/login."""
 
@@ -211,9 +266,23 @@ class LoginResponse(BaseModel):
 class BuiltMacro(BaseModel):
     """One entry in the GET /macros registry listing."""
 
-    macro_name: str
+    technical_name: str
+    display_name: str
+    description: str | None
+    icon: str
     image_tag: str
     built_at: str
+    updated_at: str
+
+
+class MacroDetail(BuiltMacro):
+    """Full record for GET /macros/{technical_name}, including source_code.
+
+    Everything BuiltMacro has, plus the raw source -- needed later to
+    pre-fill an edit form, not used by the catalog listing itself.
+    """
+
+    source_code: str
 
 
 class InputUploaded(BaseModel):
@@ -221,6 +290,12 @@ class InputUploaded(BaseModel):
 
     macro_name: str
     object_key: str
+
+
+class MacroDeleted(BaseModel):
+    """Response body for a successful macro deletion."""
+
+    technical_name: str
 
 
 def build_job_manifest(macro_name: str, job_name: str) -> k8s_client.V1Job:
@@ -315,7 +390,20 @@ def login(credentials: LoginRequest) -> LoginResponse:
     dependencies=[Depends(get_current_user)],
 )
 def create_execution(macro_name: str) -> ExecutionCreated:
-    """Create a new Job run of an already-built macro, with a unique job name."""
+    """Create a new Job run of an already-built macro, with a unique job name.
+
+    404s if macro_name isn't in the registry, instead of silently trying
+    to run an image that was never built (build_job_manifest would still
+    construct a Job referencing "{macro_name}:generated" even if that tag
+    doesn't exist, and the resulting Job would just fail in the cluster
+    with a confusing ImagePullBackOff-style error instead of a clear
+    "you haven't built this yet" at request time).
+    """
+    if db.get_macro(macro_name) is None:
+        raise HTTPException(
+            status_code=404, detail=f"macro '{macro_name}' has not been built"
+        )
+
     job_name = f"{macro_name}-{uuid.uuid4().hex[:8]}"
     job = build_job_manifest(macro_name, job_name)
 
@@ -361,21 +449,39 @@ async def analyze_macro(request: Request) -> MacroAnalysis:
 
 
 @app.post(
-    "/macros/{macro_name}/build",
+    "/macros/{technical_name}/build",
     response_model=MacroBuilt,
     dependencies=[Depends(get_current_user)],
 )
-async def build_macro(macro_name: str, request: Request) -> MacroBuilt:
-    """Analyze, build, and import a macro's image (source sent as the plain-text body)."""
-    source_code = (await request.body()).decode("utf-8")
-    analysis = analyze(source_code)
-    artifacts = generate_artifacts(analysis)
-    image_tag = await run_in_threadpool(build_and_import, macro_name, source_code)
+async def build_macro(technical_name: str, body: BuildMacroRequest) -> MacroBuilt:
+    """Analyze, build, and import a macro's image, then UPSERT it into the registry.
 
-    BUILT_MACROS[macro_name] = {
-        "image_tag": image_tag,
-        "built_at": datetime.now(timezone.utc).isoformat(),
-    }
+    UPSERT (see db.upsert_macro) rather than insert-only: rebuilding an
+    existing technical_name overwrites its row instead of erroring, which
+    is also what a future "edit" endpoint will rely on.
+
+    400s if body.icon isn't one of db.VALID_ICONS -- checked by
+    db.upsert_macro itself (InvalidIconError), caught here and turned into
+    an HTTP error rather than the 500 an unhandled exception would give.
+    """
+    analysis = analyze(body.source_code)
+    artifacts = generate_artifacts(analysis)
+    image_tag = await run_in_threadpool(build_and_import, technical_name, body.source_code)
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        db.upsert_macro(
+            technical_name=technical_name,
+            display_name=body.display_name,
+            description=body.description,
+            icon=body.icon,
+            source_code=body.source_code,
+            image_tag=image_tag,
+            built_at=now,
+            updated_at=now,
+        )
+    except InvalidIconError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return MacroBuilt(image_tag=image_tag, **analysis, artifacts=artifacts)
 
@@ -386,11 +492,69 @@ async def build_macro(macro_name: str, request: Request) -> MacroBuilt:
     dependencies=[Depends(get_current_user)],
 )
 def list_macros() -> list[BuiltMacro]:
-    """List every macro built so far, from the in-memory registry."""
-    return [
-        BuiltMacro(macro_name=macro_name, **entry)
-        for macro_name, entry in BUILT_MACROS.items()
-    ]
+    """List every macro built so far, from the SQLite registry."""
+    return [BuiltMacro(**dict(row)) for row in db.list_macros()]
+
+
+@app.get(
+    "/macros/{technical_name}",
+    response_model=MacroDetail,
+    dependencies=[Depends(get_current_user)],
+)
+def get_macro(technical_name: str) -> MacroDetail:
+    """One macro's full record, including source_code (for a future edit form)."""
+    row = db.get_macro(technical_name)
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"macro '{technical_name}' has not been built"
+        )
+    return MacroDetail(**dict(row))
+
+
+@app.delete(
+    "/macros/{technical_name}",
+    response_model=MacroDeleted,
+    dependencies=[Depends(get_current_user)],
+)
+def delete_macro(technical_name: str) -> MacroDeleted:
+    """Delete a macro's registry row, and best-effort remove its local docker image.
+
+    404s if technical_name isn't in the registry -- deleting something
+    that was never built is a client error, not a no-op success.
+
+    The `docker rmi` is best-effort: if it fails (image already removed,
+    docker unreachable, whatever), that's logged and the request still
+    succeeds, since the registry row is the source of truth for what GET
+    /macros shows and that's already gone either way.
+
+    Known, accepted limitation, not a bug to chase: this does NOT remove
+    the image from the k3d cluster's internal containerd store -- `k3d
+    image import` (in builder.py) copies the image into every cluster
+    node's own containerd, a separate store `docker rmi` has no reach
+    into. A deleted-then-rebuilt macro with the same technical_name still
+    works correctly (the new `docker build` + `k3d image import` simply
+    overwrites that tag in containerd), so this doesn't cause incorrect
+    behavior -- it just means disk space in the cluster's nodes isn't
+    reclaimed on delete. Worth fixing once this stops being a single
+    local k3d cluster with no real storage pressure.
+    """
+    deleted = db.delete_macro(technical_name)
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail=f"macro '{technical_name}' has not been built"
+        )
+
+    try:
+        subprocess.run(
+            ["docker", "rmi", f"{technical_name}:generated"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        logger.warning("docker rmi %s:generated failed, continuing: %s", technical_name, exc)
+
+    return MacroDeleted(technical_name=technical_name)
 
 
 @app.post(

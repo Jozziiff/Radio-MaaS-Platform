@@ -1,8 +1,26 @@
-"""Tests for the backend-api service (M2). See main.py for module purpose."""
+"""Tests for the backend-api service (M2, updated M5). See main.py for module purpose."""
 
+import pytest
 from kubernetes import client as k8s_client
 
+import main
 from main import build_job_manifest, map_job_status
+
+
+@pytest.fixture(autouse=True)
+def minio_credentials_loaded():
+    """Simulate main.py's startup call to set the Vault-sourced MinIO credentials.
+
+    Deliberately different from the old hardcoded devadmin/devpassword123
+    constants, so a test asserting these values proves build_job_manifest
+    actually reads the module-level variable at call time, rather than
+    still using an old hardcoded value that happens to match.
+    """
+    main.MINIO_ACCESS_KEY = "vault-sourced-access-key"
+    main.MINIO_SECRET_KEY = "vault-sourced-secret-key"
+    yield
+    main.MINIO_ACCESS_KEY = None
+    main.MINIO_SECRET_KEY = None
 
 
 def test_build_job_manifest_uses_given_job_name():
@@ -42,15 +60,23 @@ def test_build_job_manifest_uses_different_minio_keys_for_a_different_macro():
     assert env["MINIO_OUTPUT_KEY"] == "cell-load-demo/output.csv"
 
 
-def test_build_job_manifest_sets_minio_connection_env_vars():
+def test_build_job_manifest_sets_minio_endpoint():
     job = build_job_manifest("rtwp-anomaly-demo", "rtwp-anomaly-demo-abc123")
 
     container = job.spec.template.spec.containers[0]
     env = {e.name: e.value for e in container.env}
 
     assert env["MINIO_ENDPOINT"] == "minio:9000"
-    assert env["MINIO_ACCESS_KEY"] == "devadmin"
-    assert env["MINIO_SECRET_KEY"] == "devpassword123"
+
+
+def test_build_job_manifest_uses_the_vault_sourced_minio_credentials():
+    job = build_job_manifest("rtwp-anomaly-demo", "rtwp-anomaly-demo-abc123")
+
+    container = job.spec.template.spec.containers[0]
+    env = {e.name: e.value for e in container.env}
+
+    assert env["MINIO_ACCESS_KEY"] == "vault-sourced-access-key"
+    assert env["MINIO_SECRET_KEY"] == "vault-sourced-secret-key"
 
 
 def test_build_job_manifest_has_no_hostpath_data_volume():

@@ -19,37 +19,89 @@ entrypoint is now the MinIO wrapper (templates/wrapper.py, wired in via
 artifact_generator.py/builder.py in M3), which fetches the macro's input
 from MinIO and uploads its output back — the Job itself no longer touches
 any host filesystem path.
+
+M4: every endpoint below except /auth/login now requires a valid JWT
+(auth.py's get_current_user dependency) via `Authorization: Bearer <token>`.
+POST /auth/login exchanges the hardcoded dev admin credentials for a token.
+
+M5: JWT_SECRET and the MinIO credentials are no longer hardcoded/env-var
+placeholders -- they're read from Vault once at startup (vault_client.py)
+and handed to auth.py (via set_jwt_secret()) and to the module-level
+MINIO_ACCESS_KEY/MINIO_SECRET_KEY below. Only the first few characters of
+each secret are ever logged, to confirm loading succeeded without printing
+the actual value anywhere.
 """
 
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from ast_engine import analyze
 from artifact_generator import generate_artifacts
+from auth import (
+    ADMIN_PASSWORD_HASH,
+    ADMIN_USERNAME,
+    create_token,
+    get_current_user,
+    set_jwt_secret,
+    verify_password,
+)
 from builder import build_and_import
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
+from vault_client import get_jwt_secret, get_minio_credentials
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    # Ensure the Vault-loaded-secret confirmation logs are actually visible:
+    # a bare `logging.getLogger(__name__)` has no handler and no configured
+    # level by default, so INFO-level messages are silently dropped unless
+    # something (like this) sets one up.
+    logging.basicConfig(level=logging.INFO)
+    logger.setLevel(logging.INFO)
 
 JOB_NAMESPACE = "default"
 
-# MinIO connection details for macro Jobs. Same dev credentials as the
-# MinIO Deployment itself (infra/minio.yaml) -- these move into Vault +
-# External Secrets Operator in M4, not before.
+# Non-secret MinIO config -- endpoint address and bucket names aren't
+# credentials, so they stay as plain constants rather than going through
+# Vault. MINIO_ACCESS_KEY/MINIO_SECRET_KEY are the actual secrets: set
+# once at startup below from Vault, None beforehand so a Job built before
+# startup finishes loading them fails loudly instead of using a wrong
+# value.
 MINIO_ENDPOINT = "minio:9000"
-MINIO_ACCESS_KEY = "devadmin"
-MINIO_SECRET_KEY = "devpassword123"
+MINIO_ACCESS_KEY: str | None = None
+MINIO_SECRET_KEY: str | None = None
 MINIO_INPUT_BUCKET = "radio-data"
 MINIO_OUTPUT_BUCKET = "macro-results"
 
 
+def _mask(secret: str) -> str:
+    """First 4 characters of a secret, for confirming it loaded without logging it."""
+    return secret[:4] + "..."
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the local kubeconfig on startup so the client can reach the cluster."""
+    """Load the local kubeconfig, then fetch secrets from Vault, once at startup."""
+    global MINIO_ACCESS_KEY, MINIO_SECRET_KEY
+
     k8s_config.load_kube_config()
+
+    jwt_secret = get_jwt_secret()
+    set_jwt_secret(jwt_secret)
+    logger.info("loaded JWT signing key from Vault (%s)", _mask(jwt_secret))
+
+    MINIO_ACCESS_KEY, MINIO_SECRET_KEY = get_minio_credentials()
+    logger.info(
+        "loaded MinIO credentials from Vault (access_key=%s, secret_key=%s)",
+        _mask(MINIO_ACCESS_KEY),
+        _mask(MINIO_SECRET_KEY),
+    )
+
     yield
 
 
@@ -86,6 +138,19 @@ class MacroBuilt(BaseModel):
     required_columns: list[str]
     output_type: str
     artifacts: dict[str, str]
+
+
+class LoginRequest(BaseModel):
+    """Request body for POST /auth/login."""
+
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    """Response body for a successful login."""
+
+    access_token: str
 
 
 def build_job_manifest(macro_name: str, job_name: str) -> k8s_client.V1Job:
@@ -160,7 +225,25 @@ def map_job_status(status: k8s_client.V1JobStatus) -> str:
     return "pending"
 
 
-@app.post("/executions/{macro_name}", response_model=ExecutionCreated)
+@app.post("/auth/login", response_model=LoginResponse)
+def login(credentials: LoginRequest) -> LoginResponse:
+    """Exchange the hardcoded dev admin credentials for a JWT.
+
+    Always runs the password check, even when the username is already
+    wrong, and raises the identical 401 either way -- so neither the
+    response body nor the time taken reveals which part was incorrect.
+    """
+    password_ok = verify_password(credentials.password, ADMIN_PASSWORD_HASH)
+    if credentials.username != ADMIN_USERNAME or not password_ok:
+        raise HTTPException(status_code=401, detail="incorrect username or password")
+    return LoginResponse(access_token=create_token(credentials.username))
+
+
+@app.post(
+    "/executions/{macro_name}",
+    response_model=ExecutionCreated,
+    dependencies=[Depends(get_current_user)],
+)
 def create_execution(macro_name: str) -> ExecutionCreated:
     """Create a new Job run of an already-built macro, with a unique job name."""
     job_name = f"{macro_name}-{uuid.uuid4().hex[:8]}"
@@ -172,7 +255,11 @@ def create_execution(macro_name: str) -> ExecutionCreated:
     return ExecutionCreated(job_name=job_name)
 
 
-@app.get("/executions/{job_name}", response_model=ExecutionStatus)
+@app.get(
+    "/executions/{job_name}",
+    response_model=ExecutionStatus,
+    dependencies=[Depends(get_current_user)],
+)
 def get_execution_status(job_name: str) -> ExecutionStatus:
     """Look up a macro execution's current status by Job name."""
     batch_api = k8s_client.BatchV1Api()
@@ -188,7 +275,11 @@ def get_execution_status(job_name: str) -> ExecutionStatus:
     return ExecutionStatus(job_name=job_name, status=map_job_status(job.status))
 
 
-@app.post("/macros/analyze", response_model=MacroAnalysis)
+@app.post(
+    "/macros/analyze",
+    response_model=MacroAnalysis,
+    dependencies=[Depends(get_current_user)],
+)
 async def analyze_macro(request: Request) -> MacroAnalysis:
     """Analyze a raw macro script's source (sent as the plain-text request body)."""
     source_code = (await request.body()).decode("utf-8")
@@ -197,7 +288,11 @@ async def analyze_macro(request: Request) -> MacroAnalysis:
     return MacroAnalysis(**analysis, artifacts=artifacts)
 
 
-@app.post("/macros/{macro_name}/build", response_model=MacroBuilt)
+@app.post(
+    "/macros/{macro_name}/build",
+    response_model=MacroBuilt,
+    dependencies=[Depends(get_current_user)],
+)
 async def build_macro(macro_name: str, request: Request) -> MacroBuilt:
     """Analyze, build, and import a macro's image (source sent as the plain-text body)."""
     source_code = (await request.body()).decode("utf-8")

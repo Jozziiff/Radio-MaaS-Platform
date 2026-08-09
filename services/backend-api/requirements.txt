@@ -1,3 +1,11 @@
 fastapi
 uvicorn
 kubernetes
+python-jose[cryptography]
+passlib[bcrypt]
+# Pinned: passlib's bcrypt backend detection breaks on bcrypt>=4.1
+# (reads bcrypt.__about__.__version__, removed upstream).
+bcrypt==4.0.1
+# backend-api's own Vault client (vault_client.py). Not a generated-macro
+# dependency -- keep out of artifact_generator.py's requirements.txt.
+hvac

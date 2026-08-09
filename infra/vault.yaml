@@ -1,0 +1,68 @@
+# M5 (renumbered -- see CLAUDE.md): HashiCorp Vault, replacing the plain
+# env-var secrets (JWT_SECRET, MINIO_ACCESS_KEY/MINIO_SECRET_KEY) that M3/M4
+# hardcoded directly into infra/minio.yaml and services/backend-api/*.py.
+#
+# Deployment (not a Job) because Vault is a long-lived service that should
+# keep running and be restarted if it crashes -- same reasoning as MinIO's
+# Deployment in infra/minio.yaml, the opposite of a one-shot macro Job.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vault
+  template:
+    metadata:
+      labels:
+        app: vault
+    spec:
+      containers:
+        - name: vault
+          image: hashicorp/vault
+          # -dev mode: Vault starts already unsealed, in memory, with a
+          # fixed root token ("devroot") and no real storage backend --
+          # everything is lost on pod restart. This is exclusively for
+          # local development. It is NOT how Vault would ever run in
+          # production: a real deployment needs a persistent storage
+          # backend, a proper unseal process (Shamir key shares or an
+          # auto-unseal mechanism), and short-lived tokens instead of a
+          # hardcoded root token. Do not carry this manifest's shape
+          # forward into anything resembling production.
+          command:
+            - vault
+            - server
+            - -dev
+            - -dev-listen-address=0.0.0.0:8200
+            - -dev-root-token-id=devroot
+          ports:
+            - containerPort: 8200
+              name: api
+          securityContext:
+            # Vault -dev mode uses mlock to prevent secrets from being
+            # swapped to disk, which needs IPC_LOCK; the alternative is
+            # disabling mlock entirely, which -dev mode already does
+            # internally, so no special capability grant is added here.
+            capabilities:
+              add:
+                - IPC_LOCK
+---
+# ClusterIP: only reachable from inside the cluster, at vault:8200 -- other
+# pods (backend-api, and later the External Secrets Operator) are the
+# intended clients, not the outside world. Reaching it from the host for
+# this verification step goes through kubectl port-forward instead of
+# changing the Service type, same approach as infra/minio.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+spec:
+  type: ClusterIP
+  selector:
+    app: vault
+  ports:
+    - name: api
+      port: 8200
+      targetPort: 8200

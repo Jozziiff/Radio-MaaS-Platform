@@ -13,7 +13,7 @@
   <img alt="Kubernetes" src="https://img.shields.io/badge/kubernetes-k3d-326CE5?logo=kubernetes&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/api-FastAPI-009688?logo=fastapi&logoColor=white">
   <img alt="MinIO" src="https://img.shields.io/badge/storage-MinIO-C72E49?logo=minio&logoColor=white">
-  <img alt="Milestone" src="https://img.shields.io/badge/milestone-M3%20done-success">
+  <img alt="Milestone" src="https://img.shields.io/badge/milestone-M4%20done-success">
   <img alt="Status" src="https://img.shields.io/badge/status-in%20development-yellow">
   <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue">
 </p>
@@ -335,8 +335,8 @@ per-directory rather than all together in one `pytest` invocation.
 | M1 — walking skeleton | ✅ done | One macro, hand-written Dockerfile, manual `kubectl apply` |
 | M2 — API + AST engine | ✅ done | FastAPI backend, automated build, script analysis |
 | M3 — object storage | ✅ done | MinIO in place of the hostPath `/data` mount |
-| M4 — secrets | ▶ next | HashiCorp Vault + External Secrets Operator |
-| M5 — GitOps | planned | Gitea + ArgoCD, a real image registry |
+| M4 — auth + secrets | ✅ done | JWT authentication protecting every macro endpoint, backed by HashiCorp Vault |
+| M5 — GitOps | ▶ next | Gitea + ArgoCD, a real image registry |
 | M6 — observability | planned | Prometheus + Grafana |
 
 Each milestone is documented in [`docs/decisions/`](docs/decisions/) before

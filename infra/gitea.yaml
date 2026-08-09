@@ -1,0 +1,75 @@
+# M5: Gitea, a self-hosted Git server -- this milestone's source for the
+# Git repos ArgoCD will watch to drive GitOps deployment.
+#
+# Deployment (not a Job) because Gitea is a long-lived service, same
+# reasoning as MinIO's Deployment in infra/minio.yaml and Vault's in
+# infra/vault.yaml -- the opposite of a one-shot macro Job.
+#
+# SQLite via emptyDir, not a separate database: same non-persistent,
+# local-dev-only spirit as MinIO's storage in M3 -- a pod restart wipes
+# all repos and Gitea's own config. Fine for proving the Gitea-to-ArgoCD
+# wiring works; a real PVC (and likely a real database, not SQLite) is a
+# later concern once this needs to survive restarts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea
+  template:
+    metadata:
+      labels:
+        app: gitea
+    spec:
+      containers:
+        - name: gitea
+          image: gitea/gitea:latest
+          env:
+            # SQLite needs no separate database service/credentials --
+            # simplest option for local dev, same spirit as skipping a
+            # real database for MinIO/Vault at this stage.
+            - name: GITEA__database__DB_TYPE
+              value: sqlite3
+            - name: GITEA__database__PATH
+              value: /data/gitea/gitea.db
+            # Disable the interactive first-run install page so the
+            # container comes up ready to use without a manual setup step.
+            - name: GITEA__security__INSTALL_LOCK
+              value: "true"
+          ports:
+            - containerPort: 3000
+              name: http
+            - containerPort: 22
+              name: ssh
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          # emptyDir: local-dev only, same as MinIO's storage in M3 and
+          # Vault's in-memory-only -dev mode. Storage lives only as long
+          # as the pod does -- a pod restart wipes every repo.
+          emptyDir: {}
+---
+# ClusterIP: reachable from inside the cluster at gitea:3000. Reaching it
+# from the host for this verification step goes through kubectl
+# port-forward instead of changing the Service type -- same pattern as
+# infra/minio.yaml and infra/vault.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea
+spec:
+  type: ClusterIP
+  selector:
+    app: gitea
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+    - name: ssh
+      port: 22
+      targetPort: 22

@@ -1,4 +1,4 @@
-"""Vault client (M5): fetches secrets from HashiCorp Vault instead of hardcoded/placeholder values.
+"""Vault client (M4): fetches secrets from HashiCorp Vault instead of hardcoded/placeholder values.
 
 Reads VAULT_ADDR (default `http://vault:8200`, matching infra/vault.yaml's
 Service) and VAULT_TOKEN from the environment. VAULT_TOKEN here is the dev

@@ -1,4 +1,4 @@
-"""JWT authentication (M4, updated M5): protects backend-api's endpoints with bearer tokens.
+"""JWT authentication (M4): protects backend-api's endpoints with bearer tokens.
 
 A single hardcoded admin user for now -- no user store, no registration,
 no roles. `get_current_user` is a FastAPI dependency that every protected
@@ -8,7 +8,7 @@ mode (missing header, malformed token, expired token, wrong signature)
 raises the identical 401 response, deliberately, so a caller can't use the
 error to narrow down what they got wrong.
 
-M5: JWT_SECRET is sourced from Vault, not a plain env var. This module
+M4 (continued): JWT_SECRET is sourced from Vault, not a plain env var. This module
 never talks to Vault itself -- main.py's FastAPI lifespan reads the secret
 once at startup (vault_client.get_jwt_secret()) and hands it over via
 set_jwt_secret() below. JWT_SECRET is None until that happens, deliberately

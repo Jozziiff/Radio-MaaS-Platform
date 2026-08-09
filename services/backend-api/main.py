@@ -24,12 +24,12 @@ M4: every endpoint below except /auth/login now requires a valid JWT
 (auth.py's get_current_user dependency) via `Authorization: Bearer <token>`.
 POST /auth/login exchanges the hardcoded dev admin credentials for a token.
 
-M5: JWT_SECRET and the MinIO credentials are no longer hardcoded/env-var
-placeholders -- they're read from Vault once at startup (vault_client.py)
-and handed to auth.py (via set_jwt_secret()) and to the module-level
-MINIO_ACCESS_KEY/MINIO_SECRET_KEY below. Only the first few characters of
-each secret are ever logged, to confirm loading succeeded without printing
-the actual value anywhere.
+M4 (continued): JWT_SECRET and the MinIO credentials are no longer
+hardcoded/env-var placeholders -- they're read from Vault once at startup
+(vault_client.py) and handed to auth.py (via set_jwt_secret()) and to the
+module-level MINIO_ACCESS_KEY/MINIO_SECRET_KEY below. Only the first few
+characters of each secret are ever logged, to confirm loading succeeded
+without printing the actual value anywhere.
 """
 
 import logging

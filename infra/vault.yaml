@@ -1,6 +1,6 @@
-# M5 (renumbered -- see CLAUDE.md): HashiCorp Vault, replacing the plain
-# env-var secrets (JWT_SECRET, MINIO_ACCESS_KEY/MINIO_SECRET_KEY) that M3/M4
-# hardcoded directly into infra/minio.yaml and services/backend-api/*.py.
+# M4: HashiCorp Vault, replacing the plain env-var secrets (JWT_SECRET,
+# MINIO_ACCESS_KEY/MINIO_SECRET_KEY) that M3/M4's first pass hardcoded
+# directly into infra/minio.yaml and services/backend-api/*.py.
 #
 # Deployment (not a Job) because Vault is a long-lived service that should
 # keep running and be restarted if it crashes -- same reasoning as MinIO's

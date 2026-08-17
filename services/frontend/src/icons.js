@@ -8,7 +8,7 @@
 // -- there's no runtime fetch of the valid set, it's small and stable
 // enough that a fixed mirror is simpler than an extra API round trip.
 
-import { Signal, Activity, Database, BarChart3, Zap, Radio, Waves, Gauge } from "lucide-react";
+import { Signal, Activity, Database, BarChart3, Zap, Radio, Waves, Gauge, PhoneCall, TrendingUp } from "lucide-react";
 
 export const ICON_OPTIONS = [
   "signal",
@@ -19,6 +19,8 @@ export const ICON_OPTIONS = [
   "radio",
   "waves",
   "gauge",
+  "phone-call",
+  "trending-up",
 ];
 
 const ICON_COMPONENTS = {
@@ -30,6 +32,8 @@ const ICON_COMPONENTS = {
   radio: Radio,
   waves: Waves,
   gauge: Gauge,
+  "phone-call": PhoneCall,
+  "trending-up": TrendingUp,
 };
 
 export function iconComponentFor(iconName) {

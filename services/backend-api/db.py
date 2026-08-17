@@ -38,6 +38,8 @@ VALID_ICONS = {
     "radio",
     "waves",
     "gauge",
+    "phone-call",
+    "trending-up",
 }
 
 

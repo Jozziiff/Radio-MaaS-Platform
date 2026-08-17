@@ -12,126 +12,140 @@
   <img alt="Docker" src="https://img.shields.io/badge/docker-required-2496ED?logo=docker&logoColor=white">
   <img alt="Kubernetes" src="https://img.shields.io/badge/kubernetes-k3d-326CE5?logo=kubernetes&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/api-FastAPI-009688?logo=fastapi&logoColor=white">
-  <img alt="MinIO" src="https://img.shields.io/badge/storage-MinIO-C72E49?logo=minio&logoColor=white">
-  <img alt="Milestone" src="https://img.shields.io/badge/milestone-M5%20done-success">
-  <img alt="Status" src="https://img.shields.io/badge/status-in%20development-yellow">
+  <img alt="React" src="https://img.shields.io/badge/frontend-React%20%2B%20Vite-61DAFB?logo=react&logoColor=white">
+  <img alt="Milestone" src="https://img.shields.io/badge/milestone-M6%20in%20progress-yellow">
   <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue">
 </p>
 
-Radio-MaaS-Platform turns manually-run Python radio-analysis scripts
-("macros") into on-demand, containerized microservices. Send a script's raw
-source to an HTTP API and get back a running Kubernetes Job and a result —
-no manual Dockerfile writing, no manual `kubectl apply`.
+Turns manually-run Python radio-analysis scripts ("macros") into on-demand,
+containerized microservices with a web UI on top: upload a script, get back
+a built, runnable image; upload a CSV, run it, download the result — no
+manual Dockerfile writing, no manual `kubectl apply`.
 
-Built for Orange Tunisie's RADIO-OPTIM team as an INSAT internship project.
-A from-scratch rebuild guided by a prior PFE's architecture, built one
-milestone at a time — see [Roadmap](#roadmap) below.
+## What this is
 
-## Contents
+A Macro-as-a-Service platform built for Orange Tunisie's RADIO-OPTIM team,
+as an INSAT internship project. It's a from-scratch rebuild guided by a
+prior PFE's architecture (not its code), built one milestone at a time —
+each milestone's own write-up lives in [`docs/decisions/`](docs/decisions/).
+For the full mission, roadmap, and background context, see
+[`docs/brief/README.md`](docs/brief/README.md).
 
-- [Contents](#contents)
-- [How it works](#how-it-works)
-- [Project structure](#project-structure)
-- [Prerequisites](#prerequisites)
-- [Quick start](#quick-start)
-- [Verifying it's working](#verifying-its-working)
-- [Data schemas](#data-schemas)
-- [API reference](#api-reference)
-- [Running tests](#running-tests)
-- [Roadmap](#roadmap)
-- [Documentation](#documentation)
-- [License](#license)
+## Features
+
+- **AST-based script analysis** — a macro's imports and the DataFrame
+  columns it reads are detected by parsing (never executing) its source.
+- **Automated containerization** — a `Dockerfile`, `requirements.txt`, and
+  `rules.yaml` are generated from that analysis, built with `docker build`,
+  and imported straight into the local k3d cluster.
+- **CSV pre-validation on upload** — an input file's header is checked
+  against the macro's detected required columns before it's stored,
+  catching a mismatched file before a run even starts.
+- **Execution history** — every run is recorded in a SQLite table that
+  outlives the underlying Kubernetes Job, so past runs stay visible even
+  after Kubernetes garbage-collects the Job object.
+- **Per-macro Gitea version history** — every successful build also mirrors
+  the macro's generated artifacts and source into its own Gitea repo, for
+  visibility and history (not part of the deployment pipeline itself).
+- **JWT authentication** — every macro/execution endpoint requires a valid
+  bearer token, issued by a login endpoint and backed by a Vault-sourced
+  signing key.
+- **Web UI** — build a macro from source, browse the catalog, upload a CSV,
+  run it, and download the result, all from the browser.
 
 ## How it works
 
-```
-  macro.py                  requirements.txt
-  (raw source)   ─────┐      Dockerfile        ─────┐
-                       │      rules.yaml             │
-                       ▼      (+ wrapper.py)         ▼
-              POST /macros/analyze       POST /macros/{name}/build
-              (AST-based detection:      (docker build +
-               imports, columns)          k3d image import)
-                                                      │
-                                                      ▼
-                                       POST /executions/{macro_name}
-                                       GET  /executions/{job_name}
-                                                      │
-                                                      ▼
-                                          Kubernetes Job (k3d cluster)
-                                          wrapper.py entrypoint:
-                                            MinIO radio-data/{name}/input.csv
-                                                      │ (downloads, runs macro.py,
-                                                      ▼  uploads on success only)
-                                          MinIO macro-results/{name}/output.csv
-```
+![Sequence diagram of the full pipeline: auth, analyze, build, upload & validate, execute, poll & retrieve](diagram.png)
 
-1. **Analyze** — the script is parsed with Python's `ast` module (never
+1. **Authenticate** — `POST /auth/login` exchanges the dev admin credentials
+   for a JWT. Every endpoint below except `/auth/login` itself requires it
+   as `Authorization: Bearer <token>`.
+2. **Analyze** — the script is parsed with Python's `ast` module (never
    executed) to detect its imports and the DataFrame columns it reads.
-2. **Build** — a `Dockerfile`, `requirements.txt`, and `rules.yaml` are
-   generated from that analysis. The Dockerfile also copies a static MinIO
-   wrapper (`services/backend-api/templates/wrapper.py`) alongside the
-   macro and runs *it* as the entrypoint. The image is built and imported
-   straight into the local k3d cluster.
-3. **Execute** — the image runs as a one-shot Kubernetes `Job`. Its
-   wrapper entrypoint downloads the macro's input object from MinIO,
-   runs `macro.py` completely unchanged (it still only knows about
-   `INPUT_PATH`/`OUTPUT_PATH`, same as every macro), and — only if that
-   succeeds — uploads the result back to MinIO. A failed macro run uploads
-   nothing, so a bad result never gets mistaken for a real one.
-4. **Result** — poll the Job's status; download the output object from
-   MinIO once it succeeds.
+3. **Build** — a `Dockerfile`, `requirements.txt`, and `rules.yaml` are
+   generated from that analysis. The image is built and imported into the
+   local k3d cluster, the macro's metadata and source are upserted into the
+   SQLite registry, and — best-effort, never blocking the response — the
+   generated artifacts plus the macro's source are pushed to a per-macro
+   Gitea repo for version history.
+4. **Upload** — a CSV is uploaded for that macro. Its header row is checked
+   against the columns `analyze()` detected as required; a mismatch is
+   rejected with a 422 before anything is written to MinIO.
+5. **Execute** — the built image runs as a one-shot Kubernetes `Job`. Its
+   wrapper entrypoint downloads the input object from MinIO, runs
+   `macro.py` completely unchanged (it still only knows about
+   `INPUT_PATH`/`OUTPUT_PATH`), and — only if that succeeds — uploads the
+   result back to MinIO. A failed run uploads nothing.
+6. **Result** — poll the Job's status (or browse `GET /executions` for
+   every run recorded so far, including ones whose Job has since been
+   garbage-collected) and download the output object once it succeeds.
 
-MinIO is the only place macro input/output data lives — there's no shared
-host filesystem mount anywhere in this flow.
+## Tech stack
 
-## Project structure
-
-```
-radio-maas-platform/
-├── docs/
-│   ├── brief/          internship brief & living roadmap notes
-│   └── decisions/       one write-up per milestone (what, why, what's out)
-├── infra/                k3d config, hand-written k8s manifests (MinIO, jobs)
-├── macros/                sample macro scripts used to test the pipeline
-│   ├── cell-load-demo/       LTE load-imbalance demo
-│   └── rtwp-anomaly-demo/    RTWP anomaly demo (independent access pattern)
-├── services/
-│   ├── backend-api/          FastAPI service: analyze / build / execute
-│   │   └── templates/            static MinIO wrapper, copied into every build
-│   └── macro-operator/       kopf-based controller (not started, later milestone)
-└── scripts/               dev/setup helper scripts
-```
+- **Backend:** Python 3.11, FastAPI, the Kubernetes Python client
+- **Frontend:** React 19, Vite, Tailwind CSS
+- **Platform:** Docker, k3d (local Kubernetes)
+- **Storage:** MinIO (macro input/output objects), SQLite (macro registry +
+  execution history)
+- **Secrets:** HashiCorp Vault (dev mode)
+- **GitOps / version history:** ArgoCD (watching GitHub), Gitea (per-macro
+  artifact mirror)
 
 ## Prerequisites
 
-| Tool | Used for |
-|---|---|
-| [Python 3.11+](https://www.python.org/) | backend-api and macro scripts |
-| [Docker](https://www.docker.com/) | building macro images |
-| [k3d](https://k3d.io/) | running a local Kubernetes (k3s) cluster |
-| [kubectl](https://kubernetes.io/docs/tasks/tools/) | inspecting the cluster |
-| [mc](https://min.io/docs/minio/linux/reference/minio-mc.html) (or `docker run minio/mc`) | seeding/inspecting MinIO objects |
+- [Docker](https://www.docker.com/)
+- [k3d](https://k3d.io/)
+- [kubectl](https://kubernetes.io/docs/tasks/tools/)
+- [Python 3.11+](https://www.python.org/)
+- [Node.js](https://nodejs.org/) (no specific version pinned anywhere in
+  the repo; a current LTS works)
+- [mc](https://min.io/docs/minio/linux/reference/minio-mc.html) (the MinIO
+  client), or `docker run minio/mc` if you don't want it installed locally
 
-## Quick start
+## Getting started
 
-**1. Create the local cluster** (once).
+This is the real, ordered sequence from an empty clone to a working app,
+traced from the actual manifests and startup code — not a simplified
+version of it.
+
+### 1. Create the cluster
 
 ```bash
 k3d cluster create radio-maas
 ```
 
-> On Windows with Git Bash, prefix any `docker run -v ...` or
-> `docker exec ... /path`-style command below with `MSYS_NO_PATHCONV=1` —
-> otherwise Git Bash rewrites container paths into Windows paths and the
-> command fails.
+### 2. Bootstrap ArgoCD, then let it take over `infra/`
 
-**2. Deploy MinIO into the cluster** and create the two buckets macros use.
+Most of what's in `infra/` (MinIO, Vault, Gitea) is **GitOps-managed** —
+once ArgoCD's `Application` (`infra/argocd-app.yaml`) is applied, ArgoCD
+watches this repo's `infra/` directory on GitHub and applies/heals it on
+its own. You do **not** `kubectl apply` those manifests by hand. The only
+two manual steps are installing ArgoCD itself and pointing it at this repo
+— nothing it then manages should be touched directly.
 
 ```bash
-kubectl apply -f infra/minio.yaml
-kubectl rollout status deployment/minio
+kubectl create namespace argocd
+kubectl apply -n argocd --server-side --force-conflicts \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
+kubectl apply -f infra/argocd-app.yaml -n argocd
+kubectl get application -n argocd   # wait for radio-maas-infra to show Synced / Healthy
+```
+
+> `--server-side --force-conflicts` is required for the ArgoCD install
+> specifically — its `applicationsets.argoproj.io` CRD is too large for
+> plain client-side `kubectl apply`.
+
+Once `radio-maas-infra` is `Synced`/`Healthy`, MinIO, Vault, and Gitea are
+all running in the cluster.
+
+### 3. Seed MinIO's buckets
+
+MinIO's data volume is an `emptyDir` — it starts empty every time the pod
+does, so the two buckets macros use need to be created after every fresh
+cluster (not just once, ever):
+
+```bash
 kubectl port-forward svc/minio 9000:9000 &
 
 docker run --rm --entrypoint sh minio/mc -c "
@@ -141,73 +155,107 @@ docker run --rm --entrypoint sh minio/mc -c "
 "
 ```
 
-**3. Install backend-api's dependencies.**
+### 4. Seed Vault's secrets — **required on every fresh cluster**
+
+Vault runs in `-dev` mode (`infra/vault.yaml`): in-memory only, no
+persistent storage backend. **Every secret is lost on pod restart or
+cluster recreation**, so this step isn't a one-time setup — it must be
+repeated any time the Vault pod comes up fresh.
+
+```bash
+kubectl port-forward svc/vault 8200:8200 &
+export VAULT_ADDR=http://localhost:8200
+export VAULT_TOKEN=devroot   # the fixed dev root token, see infra/vault.yaml
+
+vault kv put secret/jwt signing_key="$(openssl rand -hex 32)"
+vault kv put secret/minio access_key=devadmin secret_key=devpassword123
+```
+
+`backend-api` reads both of these once at its own startup
+(`vault_client.py`) and fails to start if either is missing.
+
+### 5. Set up Gitea — manual, can't be scripted
+
+Gitea (`infra/gitea.yaml`) comes up with `INSTALL_LOCK=true`, so it skips
+the interactive first-run page, but creating an account and an API token
+still has to happen through its web UI — there's no API for the very first
+account on a fresh instance.
+
+```bash
+kubectl port-forward svc/gitea 3000:3000 &
+```
+
+1. Open http://localhost:3000, register the first account (it becomes the
+   Gitea admin automatically).
+2. In that account's Settings → Applications, generate an access token
+   with repo read/write scope.
+3. Export it for the backend to use:
+
+```bash
+export GITEA_URL=http://localhost:3000
+export GITEA_USERNAME=<the account you just created>
+export GITEA_TOKEN=<the token you just generated>
+```
+
+If you skip this step, macro builds still succeed — the Gitea mirror push
+is best-effort and only logs a warning on failure (see
+[005-gitea-artifact-mirror.md](docs/decisions/005-gitea-artifact-mirror.md)).
+`GITEA_TOKEN` isn't Vault-sourced yet; it's a known, named gap, not an
+oversight.
+
+### 6. Run the backend
 
 ```bash
 python -m venv .venv
-.venv/Scripts/pip install -r services/backend-api/requirements.txt
-```
+.venv/Scripts/pip install -r services/backend-api/requirements.txt   # Windows
+# source .venv/bin/activate && pip install -r services/backend-api/requirements.txt   # macOS/Linux
 
-**4. Run the API.**
-
-```bash
 cd services/backend-api
+export VAULT_ADDR=http://localhost:8200      # already set above if same shell
+export MINIO_ENDPOINT=localhost:9000          # backend-api runs on the host, not in-cluster
 uvicorn main:app --reload
 ```
 
-Leave this running. Swagger UI is now at http://127.0.0.1:8000/docs — you
-can drive every endpoint below from there instead of `curl` if you prefer.
+Swagger UI is now at http://127.0.0.1:8000/docs.
 
-**5. Run a sample macro through the full pipeline**, in a second terminal
-from the repo root:
+### 7. Run the frontend
 
 ```bash
-# a. Seed the macro's input object in MinIO
-docker run --rm --entrypoint sh \
-  -v "$(pwd)/macros/rtwp-anomaly-demo/sample_input.csv:/tmp/input.csv:ro" \
-  minio/mc -c "
-    mc alias set devminio http://host.docker.internal:9000 devadmin devpassword123 &&
-    mc cp /tmp/input.csv devminio/radio-data/rtwp-anomaly-demo/input.csv
-  "
-
-# b. Build: analyze the script, build its image, import it into the cluster
-curl -X POST localhost:8000/macros/rtwp-anomaly-demo/build \
-  -H "Content-Type: text/plain" \
-  --data-binary @macros/rtwp-anomaly-demo/macro.py
-
-# c. Execute: run it as a Kubernetes Job — save the job_name it returns
-curl -X POST localhost:8000/executions/rtwp-anomaly-demo
-# => {"job_name": "rtwp-anomaly-demo-xxxxxxxx"}
-
-# d. Poll until the status flips to "succeeded"
-curl localhost:8000/executions/rtwp-anomaly-demo-xxxxxxxx
-# => {"job_name": "rtwp-anomaly-demo-xxxxxxxx", "status": "succeeded"}
-
-# e. Read the result back out of MinIO
-docker run --rm --entrypoint sh minio/mc -c "
-  mc alias set devminio http://host.docker.internal:9000 devadmin devpassword123 &&
-  mc cat devminio/macro-results/rtwp-anomaly-demo/output.csv
-"
+cd services/frontend
+npm install
+npm run dev
 ```
+
+Open http://localhost:5173.
+
+### 8. First login
+
+The dev admin account is hardcoded (`services/backend-api/auth.py`):
+
+- **Username:** `admin`
+- **Password:** `devpassword123`
 
 ## Verifying it's working
 
-Each layer can be checked independently — useful for telling "the API is
-broken" apart from "the cluster is broken" apart from "the macro itself is
+Each layer can be checked independently — useful for telling "infra never
+came up" apart from "the API is broken" apart from "the macro itself is
 wrong."
 
 | Check | Command | Expect |
 |---|---|---|
 | Cluster is up | `k3d cluster list` | `radio-maas` listed, `1/1` servers |
+| Infra synced via ArgoCD | `kubectl get application radio-maas-infra -n argocd` | `SYNC STATUS Synced`, `HEALTH STATUS Healthy` |
 | MinIO is up | `kubectl get pods -l app=minio` | `STATUS Running`, `1/1` |
-| MinIO is reachable | `curl http://localhost:9000/minio/health/live` (with the port-forward from step 2 running) | `200 OK` |
+| Vault is up and unsealed | `kubectl exec deploy/vault -- vault status` (or `curl http://localhost:8200/v1/sys/health` with a port-forward) | `Sealed: false` |
+| Gitea is up | `kubectl get pods -l app=gitea` | `STATUS Running`, `1/1` |
+| Gitea is reachable | `curl -o /dev/null -w '%{http_code}' http://localhost:3000` (with a port-forward) | `200` |
 | API is up | `curl localhost:8000/docs` | HTML page (Swagger UI), not a connection error |
+| Login works | `curl -X POST localhost:8000/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"devpassword123"}'` | `200`, `{"access_token": "..."}` |
 | Image was built | `docker images \| grep <macro_name>` | a `<macro_name>:generated` row |
 | Image reached the cluster | `docker exec k3d-radio-maas-server-0 crictl images \| grep <macro_name>` | same image, same ID as `docker images` |
 | Job ran | `kubectl get jobs` | `<macro_name>-xxxxxxxx`, `STATUS Complete`, `1/1` |
-| Job's pod succeeded | `kubectl get pods` | matching pod, `STATUS Completed` |
-| What the macro/wrapper printed | `kubectl logs -l job-name=<job_name>` | usually empty on success — the wrapper doesn't print anything either unless something failed |
-| The actual result | `mc cat devminio/macro-results/<macro_name>/output.csv` | a CSV with one extra `status` column vs. the input |
+| Execution history recorded it | `curl -H "Authorization: Bearer <token>" localhost:8000/executions` | the job listed with `"status": "succeeded"`, even after the Job itself is gone |
+| The actual result | `mc cat devminio/macro-results/<macro_name>/output.csv` | a CSV with the macro's extra output column(s) |
 
 If `GET /executions/{job_name}` reports `"status": "failed"`, the fastest
 way to see why is `kubectl logs -l job-name=<job_name>` — that's the
@@ -220,9 +268,9 @@ to `macro-results` on a failed run.
 
 ### Macro contract
 
-Every macro is a single `macro.py` that follows the same shape, regardless
-of what it actually analyzes — and this hasn't changed since M1, because
-MinIO is entirely the wrapper's concern, not the macro's:
+Every macro is a single script that follows the same shape, regardless of
+what it actually analyzes — this hasn't changed since M1, because MinIO and
+the wrapper are entirely infrastructure concerns, not the macro's:
 
 - Reads a CSV from the path in the `INPUT_PATH` environment variable.
 - Writes a CSV to the path in the `OUTPUT_PATH` environment variable.
@@ -239,33 +287,13 @@ it's involved.
 
 | Bucket | Key pattern | Contents |
 |---|---|---|
-| `radio-data` | `{macro_name}/input.csv` | Seeded by hand for now (`mc cp`) — a real ingestion endpoint is a later milestone |
+| `radio-data` | `{macro_name}/input.csv` | Written by `POST /macros/{name}/input`, only after its header passes validation |
 | `macro-results` | `{macro_name}/output.csv` | Written by the wrapper only after the macro exits successfully |
 
-### Sample macro CSVs
+### `POST /macros/analyze` — response body
 
-`cell-load-demo` — input `cell_id,load_percent`, output adds `status`
-(`"overload"` if `load_percent > 80`, else `"ok"`):
-
-```
-cell_id,load_percent,status
-A1,42.5,ok
-A2,91.3,overload
-```
-
-`rtwp-anomaly-demo` — input `cell_id,rtwp_dbm`, output adds `status`
-(`"anomaly"` if `rtwp_dbm > -85`, else `"ok"`):
-
-```
-cell_id,rtwp_dbm,status
-C1,-92.5,ok
-C2,-81.3,anomaly
-```
-
-Both are intentionally simple — they exist to exercise the pipeline, not to
-perform a realistic radio analysis.
-
-### `POST /macros/analyze` and `/macros/{macro_name}/build` — response body
+Verified against the current `ast_engine.py`/`artifact_generator.py`
+output for `rtwp-anomaly-demo`:
 
 ```json
 {
@@ -280,17 +308,65 @@ perform a realistic radio analysis.
 }
 ```
 
-`/build` returns this same shape plus one extra field, `"image_tag"`
-(e.g. `"rtwp-anomaly-demo:generated"`). `requirements.txt` always includes
-`minio` — the wrapper needs it even if the macro's own source never imports
-it directly.
-
 `required_columns` is detected by walking the script's AST for
-`name["column"]`-style reads — it's a best-effort hint, not a guarantee. A
-column that passes through a script unreferenced by name (e.g. via
-`df.copy()`) won't show up here even though the macro still needs it. See
-[`docs/decisions/002-column-detection-limits.md`](docs/decisions/002-column-detection-limits.md)
-for the full explanation.
+`name["column"]`-style reads on a bare variable — it's a best-effort hint,
+not a guarantee. A column read via `df.loc[...]`, or one that passes
+through a script unreferenced by name, won't show up here even though the
+macro still needs it. See
+[`docs/decisions/002-column-detection-limits.md`](docs/decisions/002-column-detection-limits.md).
+
+### `POST /macros/{technical_name}/build` — request and response
+
+Unlike `/analyze`, the request body is JSON, not raw source text — it
+carries the metadata a catalog card needs:
+
+```json
+{
+  "display_name": "RTWP Anomaly Detector",
+  "description": "Flags cells with high uplink noise",
+  "icon": "signal",
+  "source_code": "import os\nimport pandas as pd\n..."
+}
+```
+
+The response is the same shape as `/analyze` plus `image_tag`:
+
+```json
+{
+  "image_tag": "rtwp-anomaly-demo:generated",
+  "imports": ["os", "pandas"],
+  "required_columns": ["cell_id", "rtwp_dbm"],
+  "output_type": "csv",
+  "artifacts": { "...": "..." }
+}
+```
+
+A syntax error in `source_code` returns `422` with a structured body
+instead of a stack trace: `{"error": "syntax_error", "message": ...,
+"line": ..., "source_line": ...}`. A build failure that isn't a syntax
+error (e.g. a `requirements.txt` package that fails to install) also
+returns `422`, as `{"detail": {"error": "build_failed", "message": ...}}`.
+
+### `GET /macros` — response body
+
+```json
+[
+  {
+    "technical_name": "rtwp-anomaly-demo",
+    "display_name": "RTWP Anomaly Detector",
+    "description": "Flags cells with high uplink noise",
+    "icon": "signal",
+    "image_tag": "rtwp-anomaly-demo:generated",
+    "built_at": "2026-08-17T16:45:27+00:00",
+    "updated_at": "2026-08-17T16:45:27+00:00",
+    "gitea_repo_url": "http://localhost:3000/admin/rtwp-anomaly-demo"
+  }
+]
+```
+
+`GET /macros/{technical_name}` returns this same shape for one macro, plus
+`source_code`. `gitea_repo_url` is `null` if the macro predates the Gitea
+mirror or the mirror push has never succeeded for it.
 
 ### `POST /executions/{macro_name}` — response body
 
@@ -306,47 +382,125 @@ for the full explanation.
 
 `status` is one of `pending`, `running`, `succeeded`, `failed`.
 
+### `GET /executions` — response body
+
+Every recorded execution, most recently created first — this is the
+execution history table, and it answers correctly even after Kubernetes
+has garbage-collected the underlying Job:
+
+```json
+[
+  {
+    "job_name": "rtwp-anomaly-demo-a1b2c3d4",
+    "macro_name": "rtwp-anomaly-demo",
+    "status": "succeeded",
+    "created_at": "2026-08-17T16:40:02+00:00",
+    "finished_at": "2026-08-17T16:40:19+00:00"
+  }
+]
+```
+
+`finished_at` is `null` until the execution reaches a terminal state
+(`succeeded`/`failed`).
+
 ## API reference
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/macros/analyze` | Analyze raw macro source (request body): imports, required columns, generated artifacts |
-| `POST` | `/macros/{macro_name}/build` | Analyze, build the image, import it into the k3d cluster |
-| `POST` | `/executions/{macro_name}` | Run an already-built macro as a Kubernetes Job |
-| `GET` | `/executions/{job_name}` | Job status: `pending` / `running` / `succeeded` / `failed` |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/auth/login` | – | Exchange `{username, password}` for a JWT |
+| `POST` | `/macros/analyze` | ✅ | Analyze raw macro source: imports, required columns, generated artifacts |
+| `POST` | `/macros/{technical_name}/build` | ✅ | Analyze, build the image, import it into the cluster, upsert the registry, mirror to Gitea |
+| `GET` | `/macros` | ✅ | List every built macro |
+| `GET` | `/macros/{technical_name}` | ✅ | One macro's full record, including its source |
+| `DELETE` | `/macros/{technical_name}` | ✅ | Remove a macro's registry entry (best-effort local image cleanup) |
+| `POST` | `/macros/{macro_name}/input` | ✅ | Upload a CSV; validated against required columns, then stored in MinIO |
+| `POST` | `/executions/{macro_name}` | ✅ | Run an already-built macro as a Kubernetes Job |
+| `GET` | `/executions/{job_name}` | ✅ | One execution's current status: `pending` / `running` / `succeeded` / `failed` |
+| `GET` | `/executions` | ✅ | List every recorded execution, most recent first |
+| `GET` | `/executions/{job_name}/result` | ✅ | Download a finished execution's output CSV |
 
 Full interactive docs at `/docs` (Swagger) once the server is running.
+
+## Usage
+
+<!-- GIF: creating a new macro -->
+
+<!-- GIF: uploading a CSV and running a macro end-to-end -->
+
+<!-- GIF: viewing execution history and downloading a result -->
+
+## Project structure
+
+```
+radio-maas-platform/
+├── docs/
+│   ├── brief/            internship brief & living roadmap notes (local only, gitignored)
+│   └── decisions/         one write-up per milestone/decision: what, why, what's left out
+├── infra/                  k3d/Kubernetes manifests (MinIO, Vault, Gitea, ArgoCD Application)
+├── macros/                  sample macro scripts used to develop/test the pipeline
+├── data/                    local scratch input/output files from early manual runs
+├── scripts/                 placeholder for future dev/setup helper scripts (currently empty)
+└── services/
+    ├── backend-api/            FastAPI service: analyze / build / execute / auth / registry
+    │   └── templates/              static MinIO wrapper, copied into every generated image
+    ├── frontend/                React + Vite + Tailwind web UI
+    └── macro-operator/          kopf-based controller (not started, later milestone)
+```
+
+## Documentation
+
+- [`docs/brief/README.md`](docs/brief/README.md) — project context, mission,
+  and roadmap
+- [`docs/decisions/`](docs/decisions/) — one write-up per milestone/decision:
+  what was built, why, what was deliberately left out
+- `docs/RUNBOOK.md` — **does not exist yet.** There is currently no single
+  document describing day-to-day running/debugging steps beyond this README
+  and the per-milestone decision docs; if one gets written, link it here.
 
 ## Running tests
 
 ```bash
-pytest services/backend-api/
+pytest services/backend-api/          # 145 tests: API routes, AST engine,
+                                       # builder, auth, Vault/Gitea clients,
+                                       # the MinIO wrapper template
 pytest macros/cell-load-demo/
 pytest macros/rtwp-anomaly-demo/
 ```
 
-Each macro's tests share the filename `test_macro.py`, so they're run
-per-directory rather than all together in one `pytest` invocation.
+`services/backend-api/`'s tests all run in one invocation. The two sample
+macros share the filename `test_macro.py`, so they're run per-directory
+rather than together in one `pytest` call.
 
-## Roadmap
+There is no automated test suite for `services/frontend/` yet — no test
+runner is configured in `package.json`, only `dev`/`build`/`lint`/`preview`.
+Frontend changes are currently verified manually against the running app.
 
-| Milestone | Status | What it adds |
-|---|---|---|
-| M1 — walking skeleton | ✅ done | One macro, hand-written Dockerfile, manual `kubectl apply` |
-| M2 — API + AST engine | ✅ done | FastAPI backend, automated build, script analysis |
-| M3 — object storage | ✅ done | MinIO in place of the hostPath `/data` mount |
-| M4 — auth + secrets | ✅ done | JWT authentication protecting every macro endpoint, backed by HashiCorp Vault |
-| M5 — GitOps | ✅ done | Gitea + ArgoCD, `infra/` synced automatically from Git (ArgoCD watches GitHub, not Gitea yet — see [M5-gitops.md](docs/decisions/M5-gitops.md)) |
-| M6 — observability | ▶ next | Prometheus + Grafana |
+## Known limitations
 
-Each milestone is documented in [`docs/decisions/`](docs/decisions/) before
-the next one starts — what was built, why, and what was deliberately left
-out.
-
-## Documentation
-
-- [`docs/decisions/`](docs/decisions/) — one architecture decision record
-  per milestone
+- **Vault runs in dev mode.** In-memory only, a single hardcoded root
+  token, no AppRole/Kubernetes auth, no External Secrets Operator layer.
+  Every secret is lost on pod restart and must be re-seeded (see
+  [Getting started, step 4](#4-seed-vaults-secrets--required-on-every-fresh-cluster)).
+  See [003-vault-secret-management-simplifications.md](docs/decisions/003-vault-secret-management-simplifications.md).
+- **No persistent storage.** MinIO's and Gitea's data both live on
+  `emptyDir` volumes — wiped on every pod restart, not just cluster
+  recreation.
+- **No real image registry.** Macro images are imported directly into the
+  k3d cluster via `k3d image import`/local `docker build`, not pushed to
+  or pulled from a registry.
+- **Gitea is for version history and visibility only.** It is not wired
+  into the build/deploy pipeline or the GitOps loop — ArgoCD still watches
+  GitHub for `infra/`, not Gitea. See
+  [005-gitea-artifact-mirror.md](docs/decisions/005-gitea-artifact-mirror.md).
+- **`GITEA_TOKEN` is a plain environment variable, not Vault-sourced** —
+  unlike the JWT signing key and MinIO credentials, which are.
+- **Single hardcoded admin user**, no user store, no roles/permissions, no
+  refresh tokens, no login rate limiting. See
+  [M4-jwt-auth.md](docs/decisions/M4-jwt-auth.md).
+- **No observability** (Prometheus/Grafana) yet — blocked on M6's frontend
+  work finishing first, per the project's own milestone sequencing.
+- **No real OSS/BSS integration** (M7) — blocked on a supervisor meeting
+  that hasn't happened yet; not started, not guessed at.
 
 ## License
 

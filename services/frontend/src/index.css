@@ -36,8 +36,87 @@
   --color-neutral-400: #6b7fa3;
   --color-neutral-600: #2a3a56;
   --color-neutral-800: #131c2e;
+
+  /* Night-glow ambience (AmbientGlow.jsx) -- two colors distinct from the
+     brand's amber and the signal-* neutrals, so the background reads as
+     "glowing signal sources in the dark" rather than reusing the same
+     amber everywhere. Kept as their own named tokens (not bare hex in the
+     component) so a future palette change only happens in one place. */
+  --color-signal-glow-blue: #2d6fb0;
+  --color-signal-glow-violet: #5b3fa8;
 }
 
 body {
   background: var(--color-signal-950);
+}
+
+/* Ambient glow blobs (AmbientGlow.jsx) -- large, heavily blurred radial
+   gradients that drift very slowly. Sizes are viewport-relative (vmax) so
+   the effect scales with window size instead of looking pinned/tiny on a
+   large monitor. Opacity stays low (0.10-0.16) specifically so the blobs
+   read as ambience behind Card/Sidebar's own solid backgrounds, never as
+   a colored wash competing with foreground text.
+
+   Positions target the corners/edges deliberately, not the center: the
+   app's actual content (Shell's sidebar + main column, LoginPage's
+   centered card) already occupies the middle of the viewport, so a
+   center-weighted glow would sit directly behind the busiest text. */
+.glow-blob {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  will-change: transform;
+}
+
+.glow-blob-a {
+  top: -10vmax;
+  left: -8vmax;
+  width: 55vmax;
+  height: 55vmax;
+  background: radial-gradient(circle, var(--color-signal-glow-blue) 0%, transparent 70%);
+  opacity: 0.16;
+  animation: glow-drift-a 42s ease-in-out infinite;
+}
+
+.glow-blob-b {
+  bottom: -15vmax;
+  right: -10vmax;
+  width: 60vmax;
+  height: 60vmax;
+  background: radial-gradient(circle, var(--color-signal-glow-violet) 0%, transparent 70%);
+  opacity: 0.14;
+  animation: glow-drift-b 50s ease-in-out infinite;
+}
+
+.glow-blob-c {
+  top: 30vmax;
+  right: 15vmax;
+  width: 40vmax;
+  height: 40vmax;
+  background: radial-gradient(circle, var(--color-amber-500) 0%, transparent 70%);
+  opacity: 0.08;
+  animation: glow-drift-c 60s ease-in-out infinite;
+}
+
+@keyframes glow-drift-a {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(4vmax, 6vmax) scale(1.08); }
+}
+
+@keyframes glow-drift-b {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-5vmax, -4vmax) scale(1.06); }
+}
+
+@keyframes glow-drift-c {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-3vmax, 5vmax) scale(1.1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glow-blob-a,
+  .glow-blob-b,
+  .glow-blob-c {
+    animation: none;
+  }
 }

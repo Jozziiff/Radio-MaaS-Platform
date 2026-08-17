@@ -22,6 +22,20 @@ export const STATUS_STYLES = {
   failed: "border-danger/30 bg-danger/10 text-danger",
 };
 
+// Faint, permanent (not hover-only) glow per status -- night-glow pass.
+// Deliberately much softer than Button's hover glow (larger blur radius,
+// tighter spread, lower-alpha color) since a badge glows *at rest* to
+// read as "this status is alive," not as an interactive affordance like
+// a button's hover state. No entry for the neutral/unknown fallback --
+// a status this app doesn't recognize shouldn't glow as if it means
+// something.
+const STATUS_GLOW = {
+  pending: "shadow-[0_0_12px_-2px_rgba(245,165,36,0.35)]",
+  running: "shadow-[0_0_12px_-2px_rgba(245,165,36,0.35)]",
+  succeeded: "shadow-[0_0_12px_-2px_rgba(16,185,129,0.35)]",
+  failed: "shadow-[0_0_12px_-2px_rgba(239,87,87,0.35)]",
+};
+
 const NEUTRAL_STYLE = "border-neutral-600 bg-neutral-800 text-neutral-400";
 
 const PULSING_STATUSES = new Set(["pending", "running"]);
@@ -29,10 +43,11 @@ const PULSING_STATUSES = new Set(["pending", "running"]);
 export default function Badge({ status, className = "" }) {
   const pulsing = PULSING_STATUSES.has(status);
   const style = STATUS_STYLES[status] ?? NEUTRAL_STYLE;
+  const glow = STATUS_GLOW[status] ?? "";
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${style} ${className}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${style} ${glow} ${className}`}
     >
       {pulsing && <PulseDot />}
       {status}

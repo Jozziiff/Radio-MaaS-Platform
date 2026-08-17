@@ -25,16 +25,22 @@
 // inside a <form> and must NOT submit it on click. Only the actual
 // submit buttons pass type="submit" explicitly.
 
+// Hover-only glow (night-glow pass): a colored box-shadow that only
+// appears on :hover, not baseline -- restraint per the brief ("used with
+// restraint... not always-on"). disabled: prefix suppresses it on a
+// disabled button, since a glowing-but-unusable control would be
+// misleading. Skipped on secondary/ghost/ghost-danger -- those aren't the
+// primary-action affordance a glow is meant to draw the eye to.
 const VARIANTS = {
   primary:
-    "bg-amber-500 text-signal-950 hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-60",
+    "bg-amber-500 text-signal-950 hover:bg-amber-400 hover:shadow-[0_0_24px_-4px_var(--color-amber-500)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:shadow-none",
   secondary:
     "border border-signal-600 text-signal-200 hover:bg-signal-800 disabled:cursor-not-allowed disabled:opacity-60",
   danger:
-    "bg-danger text-signal-950 hover:bg-danger/85 disabled:cursor-not-allowed disabled:opacity-60",
+    "bg-danger text-signal-950 hover:bg-danger/85 hover:shadow-[0_0_24px_-4px_var(--color-danger)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:shadow-none",
   ghost: "text-signal-400 hover:bg-signal-800 hover:text-signal-100",
   "ghost-danger": "text-signal-400 hover:bg-danger/15 hover:text-danger",
-  chip: "border border-amber-500/30 bg-amber-500/10 text-amber-500 hover:border-amber-500/60 hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-60",
+  chip: "border border-amber-500/30 bg-amber-500/10 text-amber-500 hover:border-amber-500/60 hover:bg-amber-500/15 hover:shadow-[0_0_16px_-6px_var(--color-amber-500)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:shadow-none",
 };
 
 const SIZES = {

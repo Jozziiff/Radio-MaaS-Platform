@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useAuth } from "../auth/AuthContext";
 import Button from "../components/Button";
 import Card from "../components/Card";
+import AmbientGlow from "../components/AmbientGlow";
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -24,18 +25,10 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-signal-950 px-4">
-      {/* faint radiating-signal backdrop, purely decorative */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-0 opacity-[0.07]"
-        style={{
-          backgroundImage:
-            "radial-gradient(circle at 50% 35%, var(--color-amber-500) 0%, transparent 45%)",
-        }}
-      />
+    <div className="relative min-h-screen flex items-center justify-center bg-signal-950 px-4">
+      <AmbientGlow />
 
-      <div className="relative w-full max-w-sm">
+      <div className="relative z-10 w-full max-w-sm">
         <div className="mb-8 text-center">
           <div className="mx-auto mb-4 flex h-11 w-11 items-center justify-center rounded-full border border-signal-600 bg-signal-900">
             <svg
@@ -60,7 +53,12 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <Card as="form" onSubmit={handleSubmit} className="p-7 shadow-2xl shadow-black/40">
+        <Card
+          as="form"
+          level="accent"
+          onSubmit={handleSubmit}
+          className="p-7 shadow-2xl shadow-black/40 [box-shadow:0_0_60px_-20px_var(--color-amber-500),0_25px_50px_-12px_rgba(0,0,0,0.4)]"
+        >
           <div className="space-y-4">
             <Field
               label="Username"

@@ -12,11 +12,14 @@
 import { LayoutGrid, History, LogOut, Radio } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 
-export default function Sidebar({ page, onNavigate, giteaLink }) {
+export default function Sidebar({ page, onNavigate, giteaLink, className = "" }) {
   const { session, logout } = useAuth();
 
   return (
-    <aside className="flex h-screen w-56 shrink-0 flex-col border-r border-signal-700 bg-signal-900 px-4 py-5">
+    <aside
+      className={`flex h-screen w-56 shrink-0 flex-col border-r border-signal-700 bg-signal-900 px-4 py-5 ${className}`}
+    >
+
       <div className="flex items-center gap-2 px-2">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/10 text-amber-500">
           <Radio className="h-4 w-4" strokeWidth={2} />
@@ -69,7 +72,7 @@ function SidebarLink({ icon: Icon, label, active, onClick }) {
       onClick={onClick}
       className={
         active
-          ? "flex items-center gap-2.5 rounded-lg bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-500"
+          ? "relative flex items-center gap-2.5 rounded-lg bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-500 shadow-[0_0_16px_-4px_var(--color-amber-500)] before:absolute before:-left-1 before:top-1/2 before:h-4 before:w-0.5 before:-translate-y-1/2 before:rounded-full before:bg-amber-500"
           : "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-signal-400 transition-colors hover:bg-signal-800 hover:text-signal-100"
       }
     >

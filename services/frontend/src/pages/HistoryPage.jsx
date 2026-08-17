@@ -13,12 +13,16 @@
 // started a run from the catalog and switched back to History).
 
 import { useEffect, useState } from "react";
-import { motion } from "motion/react";
 import { Download, Loader2, ListX } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 import { useProtectedApi } from "../auth/useProtectedApi";
 import { listExecutions, downloadResult } from "../api/client";
-import Nav from "./Nav";
+import Shell from "../components/Shell";
+import TopBar from "../components/TopBar";
+import Button from "../components/Button";
+import Card from "../components/Card";
+import Badge from "../components/Badge";
+import Skeleton from "../components/Skeleton";
 
 const POLL_INTERVAL_MS = 5000;
 const TERMINAL_STATUSES = new Set(["succeeded", "failed"]);
@@ -56,20 +60,16 @@ export default function HistoryPage({ page, onNavigate }) {
   }, [hasUnfinished]);
 
   return (
-    <div className="min-h-screen bg-signal-950">
-      <Nav page={page} onNavigate={onNavigate} />
+    <Shell page={page} onNavigate={onNavigate}>
+      <TopBar
+        title="Execution history"
+        description="Every run recorded so far, independent of whether its Kubernetes Job still exists."
+      />
 
-      <main className="mx-auto max-w-4xl px-6 py-10">
-        <div className="mb-6">
-          <h1 className="text-lg font-medium text-signal-100">Execution history</h1>
-          <p className="mt-1 text-sm text-signal-400">
-            Every run recorded so far, independent of whether its Kubernetes Job still exists.
-          </p>
-        </div>
-
+      <main className="mx-auto max-w-4xl px-8 pb-10">
         <HistoryTable executions={executions} error={error} token={session.token} callProtected={callProtected} />
       </main>
-    </div>
+    </Shell>
   );
 }
 
@@ -86,18 +86,7 @@ function HistoryTable({ executions, error, token, callProtected }) {
   }
 
   if (executions === null) {
-    return (
-      <div className="space-y-2">
-        {[0, 1, 2].map((i) => (
-          <motion.div
-            key={i}
-            animate={{ opacity: [0.4, 0.8, 0.4] }}
-            transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut", delay: i * 0.15 }}
-            className="h-12 rounded-lg border border-signal-700 bg-signal-900"
-          />
-        ))}
-      </div>
-    );
+    return <Skeleton count={3} height="h-12" />;
   }
 
   if (executions.length === 0) {
@@ -109,7 +98,7 @@ function HistoryTable({ executions, error, token, callProtected }) {
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-signal-700 bg-signal-900">
+    <Card className="overflow-hidden">
       <div className="overflow-x-auto">
         <table className="w-full text-left text-sm">
           <thead>
@@ -133,7 +122,7 @@ function HistoryTable({ executions, error, token, callProtected }) {
           </tbody>
         </table>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -168,7 +157,7 @@ function ExecutionRow({ execution, token, callProtected }) {
         <p className="font-mono text-xs text-signal-400">{execution.job_name}</p>
       </td>
       <td className="px-4 py-3">
-        <StatusBadge status={execution.status} />
+        <Badge status={execution.status} />
       </td>
       <td className="px-4 py-3 text-signal-400">{formatCreatedAt(execution.created_at)}</td>
       <td className="px-4 py-3 text-signal-400">
@@ -177,19 +166,14 @@ function ExecutionRow({ execution, token, callProtected }) {
       <td className="px-4 py-3 text-right">
         {execution.status === "succeeded" && (
           <div className="flex flex-col items-end gap-1">
-            <button
-              type="button"
-              onClick={handleDownload}
-              disabled={downloading}
-              className="flex shrink-0 items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-500 transition-colors hover:border-amber-500/60 hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-60"
-            >
+            <Button variant="chip" size="sm" onClick={handleDownload} disabled={downloading}>
               {downloading ? (
                 <Loader2 className="h-3 w-3 animate-spin" strokeWidth={2} />
               ) : (
                 <Download className="h-3 w-3" strokeWidth={2} />
               )}
               Download
-            </button>
+            </Button>
             {downloadError && (
               <span className="flex items-center gap-1 text-xs text-danger">
                 <ListX className="h-3 w-3" strokeWidth={1.75} />
@@ -200,33 +184,6 @@ function ExecutionRow({ execution, token, callProtected }) {
         )}
       </td>
     </tr>
-  );
-}
-
-const STATUS_STYLES = {
-  pending: "border-amber-500/30 bg-amber-500/10 text-amber-500",
-  running: "border-amber-500/30 bg-amber-500/10 text-amber-500",
-  succeeded: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
-  failed: "border-danger/30 bg-danger/10 text-danger",
-};
-
-function StatusBadge({ status }) {
-  const pulsing = status === "pending" || status === "running";
-  const style = STATUS_STYLES[status] ?? "border-signal-600 bg-signal-800 text-signal-400";
-
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${style}`}
-    >
-      {pulsing && (
-        <motion.span
-          animate={{ opacity: [1, 0.3, 1] }}
-          transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
-          className="h-1.5 w-1.5 rounded-full bg-current"
-        />
-      )}
-      {status}
-    </span>
   );
 }
 

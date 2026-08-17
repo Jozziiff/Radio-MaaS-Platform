@@ -40,6 +40,7 @@ import {
   downloadResult,
   ValidationError,
 } from "../api/client";
+import Button from "../components/Button";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -149,14 +150,9 @@ export default function RunPanel({ token, callProtected, macro, onClose }) {
     <div className="p-6">
       <div className="mb-5 flex items-center justify-between">
         <h2 className="text-sm font-medium text-signal-100">Run {macro.display_name}</h2>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close"
-          className="rounded-md p-1 text-signal-400 transition-colors hover:bg-signal-800 hover:text-signal-100"
-        >
+        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
           <X className="h-4 w-4" strokeWidth={1.75} />
-        </button>
+        </Button>
       </div>
 
       {(phase === "idle" || phase === "starting") && (
@@ -180,15 +176,10 @@ export default function RunPanel({ token, callProtected, macro, onClose }) {
             <ValidationResult validation={validation} />
           </div>
 
-          <button
-            type="button"
-            onClick={handleRun}
-            disabled={validation?.ok !== true || phase === "starting"}
-            className="flex items-center gap-2 rounded-lg bg-amber-500 px-4 py-2.5 text-sm font-medium text-signal-950 transition-colors hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          <Button onClick={handleRun} disabled={validation?.ok !== true || phase === "starting"}>
             {phase === "starting" && <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} />}
             {phase === "starting" ? "Starting…" : "Run"}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -205,27 +196,22 @@ export default function RunPanel({ token, callProtected, macro, onClose }) {
       )}
 
       {phase === "succeeded" && (
-        <div className="flex items-center justify-between gap-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-4">
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-success-500/30 bg-success-500/10 px-4 py-4">
           <div className="flex items-center gap-3">
-            <CircleCheck className="h-5 w-5 shrink-0 text-emerald-400" strokeWidth={1.75} />
+            <CircleCheck className="h-5 w-5 shrink-0 text-success-400" strokeWidth={1.75} />
             <div>
               <p className="text-sm font-medium text-signal-100">Execution succeeded</p>
               <p className="mt-0.5 font-mono text-xs text-signal-400">{jobName}</p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={handleDownload}
-            disabled={downloading}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-2 text-sm font-medium text-signal-950 transition-colors hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          <Button onClick={handleDownload} disabled={downloading} size="compact">
             {downloading ? (
               <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} />
             ) : (
               <Download className="h-4 w-4" strokeWidth={2} />
             )}
             Download result
-          </button>
+          </Button>
         </div>
       )}
 
@@ -241,13 +227,9 @@ export default function RunPanel({ token, callProtected, macro, onClose }) {
               {jobName && <p className="mt-1 font-mono text-xs text-signal-400">{jobName}</p>}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={reset}
-            className="mt-3 rounded-lg border border-signal-600 px-3 py-1.5 text-xs text-signal-200 transition-colors hover:bg-signal-700"
-          >
+          <Button variant="secondary" size="sm" onClick={reset} className="mt-3">
             Try again
-          </button>
+          </Button>
         </div>
       )}
     </div>
@@ -268,11 +250,11 @@ function ValidationResult({ validation }) {
 
   if (validation.ok) {
     return (
-      <div className="mt-2 flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400">
+      <div className="mt-2 flex items-start gap-2 rounded-lg border border-success-500/30 bg-success-500/10 px-3 py-2 text-xs text-success-400">
         <CircleCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.75} />
         <span>
           Looks good — matched{" "}
-          <span className="font-mono text-emerald-300">
+          <span className="font-mono text-success-400">
             {validation.matchedColumns.length > 0 ? validation.matchedColumns.join(", ") : "no required columns"}
           </span>
           .

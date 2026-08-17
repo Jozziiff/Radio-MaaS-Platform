@@ -12,13 +12,30 @@
   --color-signal-700: #1c283d;
   --color-signal-600: #2a3a56;
   --color-signal-400: #6b7fa3;
-  --color-signal-200: #c3ceE0;
+  --color-signal-200: #c3cee0;
   --color-signal-100: #e4e9f2;
 
+  /* Brand primary -- amber is already used for every CTA/accent across the
+     app; named explicitly here so that's a deliberate single-primary
+     system, not an implicit convention to rediscover per screen. */
   --color-amber-500: #f5a524;
   --color-amber-400: #ffb84d;
 
+  /* Semantic status colors -- one name per meaning, reused everywhere a
+     status appears (Badge component, RunPanel's phase boxes) instead of
+     each screen picking its own inline color. "pending"/"running" both
+     map to amber (the brand color already reads as "in progress" via the
+     CTA usage above); success/danger/neutral are their own families.
+     success-* mirrors Tailwind's default emerald values verbatim -- it
+     was already in use throughout via bare `emerald-*` utility classes
+     (an implicit, undeclared dependency on Tailwind's default palette),
+     just not previously named as a token of this project's own system. */
+  --color-success-400: #34d399;
+  --color-success-500: #10b981;
   --color-danger: #ef5757;
+  --color-neutral-400: #6b7fa3;
+  --color-neutral-600: #2a3a56;
+  --color-neutral-800: #131c2e;
 }
 
 body {

@@ -9,6 +9,7 @@ import { useState } from "react";
 import { X } from "lucide-react";
 import { buildMacro } from "../api/client";
 import IconPicker from "./IconPicker";
+import Button from "../components/Button";
 
 export default function MacroForm({
   token,
@@ -60,14 +61,9 @@ export default function MacroForm({
         <div className="mb-5 flex items-center justify-between">
           {title && <h2 className="text-sm font-medium text-signal-100">{title}</h2>}
           {onCancel && (
-            <button
-              type="button"
-              onClick={onCancel}
-              aria-label="Close"
-              className="rounded-md p-1 text-signal-400 transition-colors hover:bg-signal-800 hover:text-signal-100"
-            >
+            <Button variant="ghost" size="icon" onClick={onCancel} aria-label="Close">
               <X className="h-4 w-4" strokeWidth={1.75} />
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -159,13 +155,9 @@ export default function MacroForm({
           </div>
         )}
 
-        <button
-          type="submit"
-          disabled={submitting}
-          className="mt-4 rounded-lg bg-amber-500 px-4 py-2.5 text-sm font-medium text-signal-950 transition-colors hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
-        >
+        <Button type="submit" disabled={submitting} className="mt-4">
           {submitting ? submittingLabel : submitLabel}
-        </button>
+        </Button>
       </form>
 
       {result && <BuildResult result={result} />}

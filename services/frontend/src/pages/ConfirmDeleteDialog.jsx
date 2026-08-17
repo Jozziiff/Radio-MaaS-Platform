@@ -3,6 +3,9 @@
 // separate, focused step rather than a browser confirm() so it can show
 // the macro's display_name and match the app's own visual language.
 
+import Button from "../components/Button";
+import Card from "../components/Card";
+
 export default function ConfirmDeleteDialog({ macro, onConfirm, onCancel, deleting, error }) {
   return (
     <div
@@ -11,7 +14,7 @@ export default function ConfirmDeleteDialog({ macro, onConfirm, onCancel, deleti
       aria-modal="true"
       aria-labelledby="confirm-delete-title"
     >
-      <div className="w-full max-w-sm rounded-xl border border-signal-700 bg-signal-900 p-6 shadow-2xl shadow-black/40">
+      <Card className="w-full max-w-sm p-6 shadow-2xl shadow-black/40">
         <h2 id="confirm-delete-title" className="text-sm font-medium text-signal-100">
           Delete {macro.display_name}?
         </h2>
@@ -27,24 +30,14 @@ export default function ConfirmDeleteDialog({ macro, onConfirm, onCancel, deleti
         )}
 
         <div className="mt-6 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={deleting}
-            className="rounded-lg border border-signal-600 px-3 py-2 text-sm text-signal-200 transition-colors hover:bg-signal-800 disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          <Button variant="secondary" onClick={onCancel} disabled={deleting}>
             Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={deleting}
-            className="rounded-lg bg-danger px-3 py-2 text-sm font-medium text-signal-950 transition-colors hover:bg-danger/85 disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          </Button>
+          <Button variant="danger" onClick={onConfirm} disabled={deleting}>
             {deleting ? "Deleting…" : "Delete"}
-          </button>
+          </Button>
         </div>
-      </div>
+      </Card>
     </div>
   );
 }

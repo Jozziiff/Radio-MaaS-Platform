@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { useAuth } from "../auth/AuthContext";
+import Button from "../components/Button";
+import Card from "../components/Card";
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -58,10 +60,7 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <form
-          onSubmit={handleSubmit}
-          className="rounded-xl border border-signal-700 bg-signal-900 p-7 shadow-2xl shadow-black/40"
-        >
+        <Card as="form" onSubmit={handleSubmit} className="p-7 shadow-2xl shadow-black/40">
           <div className="space-y-4">
             <Field
               label="Username"
@@ -103,14 +102,10 @@ export default function LoginPage() {
             </div>
           )}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="mt-6 w-full rounded-lg bg-amber-500 px-4 py-2.5 text-sm font-medium text-signal-950 transition-colors hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          <Button type="submit" disabled={submitting} className="mt-6 w-full">
             {submitting ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
+          </Button>
+        </Card>
 
         <p className="mt-6 text-center text-xs text-signal-400">
           Orange Tunisie &middot; internal tool &middot; dev environment

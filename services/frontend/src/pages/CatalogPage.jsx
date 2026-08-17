@@ -28,7 +28,11 @@ import { iconComponentFor } from "../icons";
 import MacroForm from "./MacroForm";
 import RunPanel from "./RunPanel";
 import ConfirmDeleteDialog from "./ConfirmDeleteDialog";
-import Nav from "./Nav";
+import Shell from "../components/Shell";
+import TopBar from "../components/TopBar";
+import Button from "../components/Button";
+import { cardClasses } from "../components/Card";
+import Skeleton from "../components/Skeleton";
 import { Pencil, Trash2, Plus, Play, ExternalLink, GitBranch } from "lucide-react";
 
 const CARD_TRANSITION = { type: "spring", stiffness: 420, damping: 38, mass: 0.7 };
@@ -124,21 +128,12 @@ export default function CatalogPage({ page, onNavigate }) {
   }
 
   return (
-    <div className="min-h-screen bg-signal-950">
-      <Nav page={page} onNavigate={onNavigate} giteaLink={<GiteaInstanceLink macros={macros} />} />
-
-      <main className="mx-auto max-w-4xl px-6 py-10">
-        <div className="mb-6 flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-medium text-signal-100">Macro catalog</h1>
-            <p className="mt-1 text-sm text-signal-400">
-              Built macros ready to run, and a place to build new ones.
-            </p>
-          </div>
-          <button
-            onClick={toggleCreate}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-signal-950 transition-colors hover:bg-amber-400 active:scale-[0.97]"
-          >
+    <Shell page={page} onNavigate={onNavigate} giteaLink={<GiteaInstanceLink macros={macros} />}>
+      <TopBar
+        title="Macro catalog"
+        description="Built macros ready to run, and a place to build new ones."
+        action={
+          <Button onClick={toggleCreate} className="active:scale-[0.97]">
             {expanded?.type === "create" ? (
               "Close"
             ) : (
@@ -147,9 +142,11 @@ export default function CatalogPage({ page, onNavigate }) {
                 New macro
               </>
             )}
-          </button>
-        </div>
+          </Button>
+        }
+      />
 
+      <main className="mx-auto max-w-4xl px-8 pb-10">
         <CatalogGrid
           macros={macros}
           error={catalogError}
@@ -181,7 +178,7 @@ export default function CatalogPage({ page, onNavigate }) {
           onConfirm={confirmDelete}
         />
       )}
-    </div>
+    </Shell>
   );
 }
 
@@ -211,18 +208,7 @@ function CatalogGrid({
   }
 
   if (macros === null) {
-    return (
-      <div className="grid gap-3 sm:grid-cols-2">
-        {[0, 1].map((i) => (
-          <motion.div
-            key={i}
-            animate={{ opacity: [0.4, 0.8, 0.4] }}
-            transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut", delay: i * 0.15 }}
-            className="h-26 rounded-xl border border-signal-700 bg-signal-900"
-          />
-        ))}
-      </div>
-    );
+    return <Skeleton count={2} height="h-26" stacked={false} />;
   }
 
   if (macros.length === 0 && expanded?.type !== "create") {
@@ -283,7 +269,9 @@ function CatalogGrid({
                     onBuilt={onBuilt}
                   />
                 ) : (
-                  <p className="p-6 text-sm text-signal-400">Loading…</p>
+                  <div className="p-6">
+                    <Skeleton count={3} height="h-8" />
+                  </div>
                 )}
               </ExpandedFormCard>
             );
@@ -326,7 +314,7 @@ function ExpandedFormCard({ layoutId, children }) {
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.98 }}
       transition={CARD_TRANSITION}
-      className="col-span-full overflow-hidden rounded-xl border border-amber-500/40 bg-signal-900 shadow-xl shadow-black/30"
+      className={`col-span-full overflow-hidden ${cardClasses("accent")}`}
     >
       {children}
     </motion.div>
@@ -343,7 +331,7 @@ function MacroCard({ macro, onEdit, onRun, onDelete }) {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={CARD_TRANSITION}
-      className="group relative rounded-xl border border-signal-700 bg-signal-900 p-4 transition-colors hover:border-amber-500/40 hover:bg-signal-800/60"
+      className={`group relative p-4 transition-colors hover:border-amber-500/40 hover:bg-signal-800/60 ${cardClasses("default")}`}
     >
       <div className="flex items-start gap-3">
         <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-500 transition-colors group-hover:border-amber-500/60 group-hover:bg-amber-500/15">
@@ -357,24 +345,24 @@ function MacroCard({ macro, onEdit, onRun, onDelete }) {
         {/* Edit/Delete: hidden until the card is hovered (or focused, for
             keyboard users), so the catalog stays visually calm at rest. */}
         <div className="flex shrink-0 gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="icon"
             title="Edit"
             aria-label={`Edit ${macro.display_name}`}
             onClick={() => onEdit(macro.technical_name)}
-            className="rounded-md p-1.5 text-signal-400 transition-colors hover:bg-signal-700 hover:text-signal-100"
           >
             <Pencil className="h-3.5 w-3.5" strokeWidth={1.75} />
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="ghost-danger"
+            size="icon"
             title="Delete"
             aria-label={`Delete ${macro.display_name}`}
             onClick={() => onDelete(macro)}
-            className="rounded-md p-1.5 text-signal-400 transition-colors hover:bg-danger/15 hover:text-danger"
           >
             <Trash2 className="h-3.5 w-3.5" strokeWidth={1.75} />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -384,14 +372,10 @@ function MacroCard({ macro, onEdit, onRun, onDelete }) {
         <p className="text-xs text-signal-400">Built {formatBuiltAt(macro.built_at)}</p>
         <div className="flex shrink-0 items-center gap-2">
           <GiteaRepoLink url={macro.gitea_repo_url} />
-          <button
-            type="button"
-            onClick={() => onRun(macro.technical_name)}
-            className="flex shrink-0 items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-500 transition-colors hover:border-amber-500/60 hover:bg-amber-500/15"
-          >
+          <Button variant="chip" size="sm" onClick={() => onRun(macro.technical_name)}>
             <Play className="h-3 w-3" strokeWidth={2} fill="currentColor" />
             Run
-          </button>
+          </Button>
         </div>
       </div>
     </motion.div>
@@ -447,6 +431,9 @@ function giteaInstanceUrlFrom(macros) {
   return url.toString();
 }
 
+// Styled to match Sidebar's SidebarLink (its own home, not this file's --
+// kept here since it depends on `macros`, which only CatalogPage has
+// loaded; Sidebar just renders whatever giteaLink node it's given).
 function GiteaInstanceLink({ macros }) {
   const href = giteaInstanceUrlFrom(macros);
 
@@ -454,9 +441,9 @@ function GiteaInstanceLink({ macros }) {
     return (
       <span
         title="No macro has been pushed to Gitea yet"
-        className="flex items-center gap-1.5 text-sm text-signal-600"
+        className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-signal-600"
       >
-        <GitBranch className="h-3.5 w-3.5" strokeWidth={1.75} />
+        <GitBranch className="h-4 w-4" strokeWidth={1.75} />
         Gitea
       </span>
     );
@@ -468,9 +455,9 @@ function GiteaInstanceLink({ macros }) {
       target="_blank"
       rel="noopener noreferrer"
       title="Browse all mirrored macros in Gitea"
-      className="flex items-center gap-1.5 text-sm text-signal-400 transition-colors hover:text-signal-100"
+      className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-signal-400 transition-colors hover:bg-signal-800 hover:text-signal-100"
     >
-      <GitBranch className="h-3.5 w-3.5" strokeWidth={1.75} />
+      <GitBranch className="h-4 w-4" strokeWidth={1.75} />
       Gitea
     </a>
   );

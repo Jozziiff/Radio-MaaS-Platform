@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  /* Deep signal-blue base, amber accent -- a control-room palette, not a
+     generic SaaS purple. Meant to read as an operations tool. */
+  --color-signal-950: #060a14;
+  --color-signal-900: #0b1220;
+  --color-signal-800: #131c2e;
+  --color-signal-700: #1c283d;
+  --color-signal-600: #2a3a56;
+  --color-signal-400: #6b7fa3;
+  --color-signal-200: #c3ceE0;
+  --color-signal-100: #e4e9f2;
+
+  --color-amber-500: #f5a524;
+  --color-amber-400: #ffb84d;
+
+  --color-danger: #ef5757;
+}
+
+body {
+  background: var(--color-signal-950);
+}

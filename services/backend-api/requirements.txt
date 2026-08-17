@@ -13,3 +13,7 @@ hvac
 # download) -- same library the generated wrapper.py template uses.
 minio
 python-multipart
+# gitea_client.py's own HTTP calls to Gitea's REST API. Already present
+# transitively via hvac, but declared directly since gitea_client.py
+# imports it on its own, not just through hvac.
+requests

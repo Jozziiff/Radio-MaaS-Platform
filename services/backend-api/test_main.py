@@ -9,6 +9,7 @@ from kubernetes import client as k8s_client
 from minio.error import S3Error
 
 import db
+import gitea_client
 import main
 from main import app, build_job_manifest, map_job_status
 
@@ -29,6 +30,22 @@ def minio_credentials_loaded():
     yield
     main.MINIO_ACCESS_KEY = None
     main.MINIO_SECRET_KEY = None
+
+
+@pytest.fixture(autouse=True)
+def gitea_disabled_by_default(monkeypatch):
+    """Make build_macro's Gitea mirror step fail immediately, with no real
+    network call, unless a test explicitly patches main.gitea_client
+    itself. Without this, a build_macro test would either depend on
+    whatever GITEA_URL/GITEA_TOKEN happen to be set in the environment
+    actually running the tests, or make a real (slow, flaky in CI)
+    connection attempt to a Gitea that isn't there.
+    """
+    monkeypatch.setattr(
+        main.gitea_client,
+        "ensure_repo",
+        MagicMock(side_effect=gitea_client.GiteaError("gitea disabled in tests")),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -208,6 +225,7 @@ def test_list_macros_includes_a_macro_recorded_in_the_registry():
             "image_tag": "rtwp-anomaly-demo:generated",
             "built_at": "2026-08-09T12:00:00+00:00",
             "updated_at": "2026-08-09T12:00:00+00:00",
+            "gitea_repo_url": None,
         }
     ]
 
@@ -314,6 +332,72 @@ def test_build_macro_upserts_full_metadata_into_the_registry():
     assert macros[0]["icon"] == "signal"
 
 
+def test_build_macro_records_gitea_repo_url_on_a_successful_mirror():
+    with (
+        patch("main.build_and_import", return_value="rtwp-anomaly-demo:generated"),
+        patch("main.gitea_client.ensure_repo", return_value="http://gitea:3000/admin/rtwp-anomaly-demo"),
+        patch("main.gitea_client.push_artifacts") as mock_push,
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        build_response = client.post(
+            "/macros/rtwp-anomaly-demo/build",
+            json={
+                "display_name": "RTWP Anomaly Detector",
+                "description": "Flags cells with high uplink noise.",
+                "icon": "signal",
+                "source_code": "import pandas as pd\n",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        list_response = client.get("/macros", headers={"Authorization": f"Bearer {token}"})
+
+    assert build_response.status_code == 200
+    mock_push.assert_called_once()
+    pushed_files = mock_push.call_args.args[1]
+    assert set(pushed_files) == {
+        "Dockerfile",
+        "requirements.txt",
+        "rules.yaml",
+        "macro.py",
+        "wrapper.py",
+    }
+    assert pushed_files["macro.py"] == "import pandas as pd\n"
+    assert list_response.json()[0]["gitea_repo_url"] == "http://gitea:3000/admin/rtwp-anomaly-demo"
+
+
+def test_build_macro_succeeds_even_when_gitea_mirror_fails():
+    """The image build/registry upsert already succeeded by the time the
+    Gitea mirror runs -- a Gitea failure (bad/missing token, unreachable
+    Gitea, etc.) must be logged and swallowed, not turned into a failed
+    build response. gitea_repo_url simply stays unset.
+    """
+    with (
+        patch("main.build_and_import", return_value="rtwp-anomaly-demo:generated"),
+        patch("main.gitea_client.ensure_repo", side_effect=gitea_client.GiteaError("bad token")),
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        build_response = client.post(
+            "/macros/rtwp-anomaly-demo/build",
+            json={
+                "display_name": "RTWP Anomaly Detector",
+                "description": "Flags cells with high uplink noise.",
+                "icon": "signal",
+                "source_code": "import pandas as pd\n",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        list_response = client.get("/macros", headers={"Authorization": f"Bearer {token}"})
+
+    assert build_response.status_code == 200
+    assert list_response.json()[0]["gitea_repo_url"] is None
+
+
 def test_create_execution_returns_404_for_an_unbuilt_macro():
     with TestClient(app) as client:
         from auth import create_token
@@ -344,7 +428,31 @@ def test_create_execution_succeeds_for_a_built_macro():
     mock_batch_api.return_value.create_namespaced_job.assert_called_once()
 
 
+_RTWP_SOURCE = (
+    "import pandas as pd\n"
+    "df = pd.read_csv(path)\n"
+    "cell = df['cell_id']\n"
+    "rtwp = df['rtwp_dbm']\n"
+)
+
+
+def test_upload_macro_input_404s_for_an_unbuilt_macro():
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/macros/never-built/input",
+            files={"file": ("input.csv", b"a,b\n1,2\n", "text/csv")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 404
+
+
 def test_upload_macro_input_writes_to_minio_and_confirms():
+    _upsert_macro(source_code=_RTWP_SOURCE)
+
     with (
         patch("main.build_minio_client") as mock_build_client,
         TestClient(app) as client,
@@ -357,19 +465,110 @@ def test_upload_macro_input_writes_to_minio_and_confirms():
         token = create_token("admin")
         response = client.post(
             "/macros/rtwp-anomaly-demo/input",
-            files={"file": ("input.csv", b"cell_id,load_percent\n1,50\n", "text/csv")},
+            files={"file": ("input.csv", b"cell_id,rtwp_dbm\n1,50\n", "text/csv")},
             headers={"Authorization": f"Bearer {token}"},
         )
 
     assert response.status_code == 200
     assert response.json() == {
-        "macro_name": "rtwp-anomaly-demo",
-        "object_key": "rtwp-anomaly-demo/input.csv",
+        "status": "ok",
+        "matched_columns": ["cell_id", "rtwp_dbm"],
     }
     mock_client.put_object.assert_called_once()
     call_args = mock_client.put_object.call_args
     assert call_args.args[0] == "radio-data"
     assert call_args.args[1] == "rtwp-anomaly-demo/input.csv"
+
+
+def test_upload_macro_input_422s_and_does_not_store_when_a_column_is_missing():
+    _upsert_macro(source_code=_RTWP_SOURCE)
+
+    with (
+        patch("main.build_minio_client") as mock_build_client,
+        TestClient(app) as client,
+    ):
+        mock_client = MagicMock()
+        mock_build_client.return_value = mock_client
+
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/macros/rtwp-anomaly-demo/input",
+            files={"file": ("input.csv", b"cell_id,wrong_column\n1,50\n", "text/csv")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 422
+    body = response.json()["detail"]
+    assert body["missing_columns"] == ["rtwp_dbm"]
+    assert body["detected_headers"] == ["cell_id", "wrong_column"]
+    mock_client.put_object.assert_not_called()
+
+
+def test_upload_macro_input_uses_fresh_analysis_not_a_stale_cached_value():
+    """required_columns is re-derived from the macro's stored source_code on
+    every upload, not trusted from some earlier analysis -- seed a macro
+    whose source only reads `only_col`, so a header missing `only_col`
+    fails even though nothing about `required_columns` was passed in this
+    request.
+    """
+    _upsert_macro(source_code="df['only_col']\n")
+
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/macros/rtwp-anomaly-demo/input",
+            files={"file": ("input.csv", b"unrelated_col\n1\n", "text/csv")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["missing_columns"] == ["only_col"]
+
+
+def test_upload_macro_input_422s_for_an_unparseable_file():
+    _upsert_macro(source_code=_RTWP_SOURCE)
+
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/macros/rtwp-anomaly-demo/input",
+            files={"file": ("input.csv", b"\x00\x01\x02\xff\xfe not csv at all", "text/csv")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 422
+
+
+def test_upload_macro_input_accepts_empty_required_columns():
+    """A macro whose source doesn't reference any DataFrame columns (an
+    empty required_columns) has nothing to validate -- any header row
+    passes.
+    """
+    _upsert_macro(source_code="print('hello')\n")
+
+    with (
+        patch("main.build_minio_client") as mock_build_client,
+        TestClient(app) as client,
+    ):
+        mock_build_client.return_value = MagicMock()
+
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/macros/rtwp-anomaly-demo/input",
+            files={"file": ("input.csv", b"whatever\n1\n", "text/csv")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "matched_columns": []}
 
 
 def test_get_execution_result_404s_for_an_unknown_job_name():

@@ -47,6 +47,10 @@ Thumbs.db
 *.pid
 docker-compose.override.yml
 
+# Local SQLite state
+*.db
+*.db-journal
+
 # Logs
 *.log
 

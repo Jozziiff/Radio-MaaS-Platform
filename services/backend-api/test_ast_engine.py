@@ -1,6 +1,6 @@
 """Tests for the AST analysis engine (M2). See ast_engine.py for module purpose."""
 
-from ast_engine import analyze
+from ast_engine import analyze, find_missing_columns
 
 
 def test_collects_plain_imports():
@@ -85,3 +85,26 @@ def test_never_executes_the_source():
 
     assert result["imports"] == []
     assert result["required_columns"] == []
+
+
+def test_find_missing_columns_returns_empty_when_all_present():
+    assert find_missing_columns(["cell_id", "rtwp_dbm"], ["cell_id", "rtwp_dbm", "extra"]) == []
+
+
+def test_find_missing_columns_returns_the_missing_ones():
+    assert find_missing_columns(["cell_id", "rtwp_dbm"], ["cell_id"]) == ["rtwp_dbm"]
+
+
+def test_find_missing_columns_preserves_required_order():
+    assert find_missing_columns(["a", "b", "c"], []) == ["a", "b", "c"]
+
+
+def test_find_missing_columns_is_case_sensitive():
+    """Exact match only, no fuzzy/case-insensitive matching -- a header of
+    "Cell_ID" does NOT satisfy a required column of "cell_id".
+    """
+    assert find_missing_columns(["cell_id"], ["Cell_ID"]) == ["cell_id"]
+
+
+def test_find_missing_columns_with_no_required_columns():
+    assert find_missing_columns([], ["anything"]) == []

@@ -48,7 +48,16 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create the macros table if it doesn't already exist. Safe to call on every startup."""
+    """Create the macros table if it doesn't already exist. Safe to call on every startup.
+
+    Also adds the `gitea_repo_url` column (M6, continued: Gitea artifact
+    mirror) to a pre-existing table that predates it -- `CREATE TABLE IF
+    NOT EXISTS` alone only helps a brand-new database file; a database
+    created before this column existed needs it added separately. This is
+    the entire migration story this project has (see the module docstring)
+    -- SQLite has no `ADD COLUMN IF NOT EXISTS`, so `PRAGMA table_info` is
+    checked first to keep re-running this idempotent.
+    """
     with _connect() as conn:
         conn.execute(
             """
@@ -64,6 +73,9 @@ def init_db() -> None:
             )
             """
         )
+        existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(macros)")}
+        if "gitea_repo_url" not in existing_columns:
+            conn.execute("ALTER TABLE macros ADD COLUMN gitea_repo_url TEXT")
 
 
 def upsert_macro(
@@ -134,6 +146,22 @@ def get_macro(technical_name: str) -> sqlite3.Row | None:
         return conn.execute(
             "SELECT * FROM macros WHERE technical_name = ?", (technical_name,)
         ).fetchone()
+
+
+def update_gitea_url(technical_name: str, gitea_repo_url: str) -> None:
+    """Record a macro's Gitea mirror repo URL after a successful push.
+
+    Separate from upsert_macro rather than folding gitea_repo_url into it:
+    the Gitea push happens *after* the row is already upserted (see
+    main.py's build_macro), as a best-effort follow-up step that must not
+    block or fail the build itself -- so it needs its own narrow update,
+    not a reason to pass a not-yet-known URL through the main upsert.
+    """
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE macros SET gitea_repo_url = ? WHERE technical_name = ?",
+            (gitea_repo_url, technical_name),
+        )
 
 
 def delete_macro(technical_name: str) -> bool:

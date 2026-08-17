@@ -56,8 +56,21 @@ M6 (continued): DELETE /macros/{technical_name} removes a macro's
 registry row and best-effort removes its local `docker` image -- see the
 endpoint's own docstring for why the k3d-imported copy is a known,
 accepted gap rather than something this also cleans up.
+
+M6 (continued): POST /macros/{technical_name}/build now also mirrors a
+macro's generated artifacts into a per-macro Gitea repository
+(gitea_client.py) after a successful image build -- version history and
+visibility only, per docs/decisions/005-gitea-artifact-mirror.md. This is
+the first time the Gitea instance deployed since M5
+(docs/decisions/M5-gitops.md) is actually used for anything; it remains
+disconnected from the GitOps loop (ArgoCD still watches GitHub, not
+Gitea) and from the build pipeline itself (builder.py's docker build /
+k3d image import path is untouched). A Gitea failure is logged and never
+fails the build request -- the image already exists at that point, and
+that matters more than the mirror succeeding.
 """
 
+import csv
 import io
 import logging
 import os
@@ -66,9 +79,11 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import db
-from ast_engine import analyze
+import gitea_client
+from ast_engine import analyze, find_missing_columns
 from artifact_generator import generate_artifacts
 from auth import (
     ADMIN_PASSWORD_HASH,
@@ -136,6 +151,12 @@ MINIO_OUTPUT_BUCKET = "macro-results"
 # tolerable gap than "the whole macro catalog goes empty." Worth moving to
 # SQLite too if that gap ever actually matters.
 JOB_TO_MACRO: dict[str, str] = {}
+
+# The same static wrapper template builder.py copies into every build
+# context -- read here too so the Gitea mirror's `wrapper.py` entry matches
+# exactly what actually got built into the image, not a second copy that
+# could drift from it.
+_WRAPPER_TEMPLATE_PATH = Path(__file__).parent / "templates" / "wrapper.py"
 
 
 def _mask(secret: str) -> str:
@@ -273,6 +294,7 @@ class BuiltMacro(BaseModel):
     image_tag: str
     built_at: str
     updated_at: str
+    gitea_repo_url: str | None = None
 
 
 class MacroDetail(BuiltMacro):
@@ -286,10 +308,10 @@ class MacroDetail(BuiltMacro):
 
 
 class InputUploaded(BaseModel):
-    """Response body for a successful macro input upload."""
+    """Response body for a successful, validated macro input upload."""
 
-    macro_name: str
-    object_key: str
+    status: str
+    matched_columns: list[str]
 
 
 class MacroDeleted(BaseModel):
@@ -463,6 +485,13 @@ async def build_macro(technical_name: str, body: BuildMacroRequest) -> MacroBuil
     400s if body.icon isn't one of db.VALID_ICONS -- checked by
     db.upsert_macro itself (InvalidIconError), caught here and turned into
     an HTTP error rather than the 500 an unhandled exception would give.
+
+    After a successful build, best-effort mirrors the generated artifacts
+    into Gitea (ensure_repo + push_artifacts) and records the repo URL.
+    This step runs after the registry row already exists and never raises
+    past this function -- a Gitea outage is logged and otherwise invisible
+    to the caller, since the image build (already complete by this point)
+    is what actually matters for the response to be a success.
     """
     analysis = analyze(body.source_code)
     artifacts = generate_artifacts(analysis)
@@ -483,7 +512,32 @@ async def build_macro(technical_name: str, body: BuildMacroRequest) -> MacroBuil
     except InvalidIconError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    try:
+        repo_url = await run_in_threadpool(_mirror_to_gitea, technical_name, body.source_code, artifacts)
+        db.update_gitea_url(technical_name, repo_url)
+    except gitea_client.GiteaError as exc:
+        logger.error("Gitea mirror failed for '%s', continuing: %s", technical_name, exc)
+
     return MacroBuilt(image_tag=image_tag, **analysis, artifacts=artifacts)
+
+
+def _mirror_to_gitea(technical_name: str, source_code: str, artifacts: dict[str, str]) -> str:
+    """Push a macro's generated artifacts plus its source and the MinIO
+    wrapper into its Gitea repo (creating the repo first if needed).
+
+    A plain function, not inlined into build_macro, so it can run inside
+    run_in_threadpool alongside build_and_import -- gitea_client's calls
+    are synchronous (requests), same reasoning as build_and_import's own
+    subprocess calls.
+    """
+    repo_url = gitea_client.ensure_repo(technical_name)
+    files = {
+        **artifacts,
+        "macro.py": source_code,
+        "wrapper.py": _WRAPPER_TEMPLATE_PATH.read_text(),
+    }
+    gitea_client.push_artifacts(technical_name, files)
+    return repo_url
 
 
 @app.get(
@@ -557,16 +611,70 @@ def delete_macro(technical_name: str) -> MacroDeleted:
     return MacroDeleted(technical_name=technical_name)
 
 
+def _parse_csv_header(contents: bytes) -> list[str]:
+    """The first row of a CSV file's bytes, as column names.
+
+    Raises:
+        ValueError: if `contents` can't be decoded as UTF-8 text, or has
+            no rows at all (an empty file, or the csv module finding
+            nothing to read). Both are treated as "not a valid CSV" by
+            the caller, not a crash.
+    """
+    text = contents.decode("utf-8")
+    reader = csv.reader(io.StringIO(text))
+    try:
+        return next(reader)
+    except StopIteration as exc:
+        raise ValueError("file has no rows") from exc
+
+
 @app.post(
     "/macros/{macro_name}/input",
     response_model=InputUploaded,
     dependencies=[Depends(get_current_user)],
 )
 async def upload_macro_input(macro_name: str, file: UploadFile) -> InputUploaded:
-    """Upload a macro's input CSV directly into MinIO, overwriting any prior input."""
-    object_key = f"{macro_name}/input.csv"
-    contents = await file.read()
+    """Validate an uploaded CSV's header against the macro's required columns, then store it.
 
+    Pre-execution validation, not just an upload: 404s if macro_name isn't
+    in the registry (nothing to validate against). Re-runs analyze() on
+    the macro's stored source_code fresh on every call -- required_columns
+    is never trusted from an old cached value, so an edited-and-rebuilt
+    macro is always checked against its current source, not a stale one.
+    422s (not a 500 or a silent pass) if the file isn't parseable as CSV,
+    or if find_missing_columns finds anything absent from the header row
+    -- either way, nothing is written to MinIO. Only a clean pass reaches
+    MinIO, same object key/overwrite behavior as before this validation
+    existed.
+
+    See docs/decisions/ for why this check, though real, isn't a
+    guarantee: it inherits every blind spot analyze()'s own column
+    detection has.
+    """
+    macro = db.get_macro(macro_name)
+    if macro is None:
+        raise HTTPException(
+            status_code=404, detail=f"macro '{macro_name}' has not been built"
+        )
+
+    contents = await file.read()
+    try:
+        headers = _parse_csv_header(contents)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            status_code=422, detail=f"'{file.filename}' is not a valid CSV: {exc}"
+        ) from exc
+
+    analysis = analyze(macro["source_code"])
+    required_columns = analysis["required_columns"]
+    missing_columns = find_missing_columns(required_columns, headers)
+    if missing_columns:
+        raise HTTPException(
+            status_code=422,
+            detail={"missing_columns": missing_columns, "detected_headers": headers},
+        )
+
+    object_key = f"{macro_name}/input.csv"
     client = build_minio_client()
     client.put_object(
         MINIO_INPUT_BUCKET,
@@ -575,7 +683,7 @@ async def upload_macro_input(macro_name: str, file: UploadFile) -> InputUploaded
         length=len(contents),
     )
 
-    return InputUploaded(macro_name=macro_name, object_key=object_key)
+    return InputUploaded(status="ok", matched_columns=required_columns)
 
 
 @app.get(

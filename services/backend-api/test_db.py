@@ -110,3 +110,60 @@ def test_delete_macro_does_not_affect_other_rows():
 
     assert db.get_macro("keep-me") is not None
     assert db.get_macro("delete-me") is None
+
+
+def test_new_macro_has_a_null_gitea_repo_url_by_default():
+    _upsert()
+
+    row = db.get_macro("rtwp-anomaly-demo")
+
+    assert row["gitea_repo_url"] is None
+
+
+def test_update_gitea_url_sets_the_column():
+    _upsert()
+
+    db.update_gitea_url("rtwp-anomaly-demo", "http://gitea:3000/admin/rtwp-anomaly-demo")
+
+    row = db.get_macro("rtwp-anomaly-demo")
+    assert row["gitea_repo_url"] == "http://gitea:3000/admin/rtwp-anomaly-demo"
+
+
+def test_update_gitea_url_does_not_affect_other_rows():
+    _upsert(technical_name="macro-a")
+    _upsert(technical_name="macro-b")
+
+    db.update_gitea_url("macro-a", "http://gitea:3000/admin/macro-a")
+
+    assert db.get_macro("macro-b")["gitea_repo_url"] is None
+
+
+def test_init_db_adds_gitea_repo_url_to_a_pre_existing_table(tmp_path, monkeypatch):
+    """A database file created before this column existed -- simulated by
+    creating the table by hand without it -- gets the column added on the
+    next init_db() call, not left behind or errored on.
+    """
+    db_path = tmp_path / "pre_existing.db"
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+
+    with db._connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE macros (
+                technical_name TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                description TEXT,
+                icon TEXT NOT NULL,
+                source_code TEXT NOT NULL,
+                image_tag TEXT NOT NULL,
+                built_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    db.init_db()
+    _upsert()
+
+    row = db.get_macro("rtwp-anomaly-demo")
+    assert row["gitea_repo_url"] is None

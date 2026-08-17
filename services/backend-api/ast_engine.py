@@ -60,6 +60,30 @@ def _collect_imports(tree: ast.AST) -> list[str]:
     return list(seen)
 
 
+def find_missing_columns(required: list[str], headers: list[str]) -> list[str]:
+    """Which of `required` aren't present in `headers`, in `required`'s own order.
+
+    A simple set difference, deliberately: case-sensitive, exact-string
+    match only, no fuzzy matching (no case-folding, no whitespace
+    trimming, no synonym lookup). Used by POST /macros/{macro_name}/input
+    to catch an obviously-wrong upload (a missing column) before it's
+    stored -- see docs/decisions/ for why this is a floor, not a
+    guarantee: it inherits every blind spot analyze()'s own column
+    detection has (e.g. a column referenced only as `df.cell_id`, not
+    `df["cell_id"]`, is invisible to both).
+
+    Args:
+        required: Column names analyze() detected the macro reading.
+        headers: Column names actually present in an uploaded CSV's header row.
+
+    Returns:
+        Entries of `required` not found in `headers`, in `required`'s
+        original order (not headers' order, not sorted).
+    """
+    header_set = set(headers)
+    return [column for column in required if column not in header_set]
+
+
 def _collect_required_columns(tree: ast.AST) -> list[str]:
     """Find plain-Name, read-context subscripts with a string key: `name["col"]`.
 

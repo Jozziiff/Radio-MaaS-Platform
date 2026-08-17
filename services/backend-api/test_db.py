@@ -138,6 +138,78 @@ def test_update_gitea_url_does_not_affect_other_rows():
     assert db.get_macro("macro-b")["gitea_repo_url"] is None
 
 
+def _insert_execution(job_name="rtwp-anomaly-demo-abc123", **overrides):
+    fields = {
+        "macro_name": "rtwp-anomaly-demo",
+        "status": "pending",
+        "created_at": "2026-08-17T10:00:00+00:00",
+    }
+    fields.update(overrides)
+    db.insert_execution(job_name, **fields)
+
+
+def test_list_executions_is_empty_on_a_fresh_database():
+    assert db.list_executions() == []
+
+
+def test_insert_execution_then_list_returns_it_with_null_finished_at():
+    _insert_execution()
+
+    rows = db.list_executions()
+
+    assert len(rows) == 1
+    assert rows[0]["job_name"] == "rtwp-anomaly-demo-abc123"
+    assert rows[0]["macro_name"] == "rtwp-anomaly-demo"
+    assert rows[0]["status"] == "pending"
+    assert rows[0]["created_at"] == "2026-08-17T10:00:00+00:00"
+    assert rows[0]["finished_at"] is None
+
+
+def test_list_executions_orders_most_recently_created_first():
+    _insert_execution(job_name="older", created_at="2026-08-01T00:00:00+00:00")
+    _insert_execution(job_name="newer", created_at="2026-08-09T00:00:00+00:00")
+
+    rows = db.list_executions()
+
+    assert [row["job_name"] for row in rows] == ["newer", "older"]
+
+
+def test_get_execution_returns_none_for_an_unknown_job_name():
+    assert db.get_execution("never-ran") is None
+
+
+def test_get_execution_returns_the_row():
+    _insert_execution()
+
+    row = db.get_execution("rtwp-anomaly-demo-abc123")
+
+    assert row is not None
+    assert row["macro_name"] == "rtwp-anomaly-demo"
+
+
+def test_update_execution_status_sets_status_and_finished_at():
+    _insert_execution()
+
+    db.update_execution_status(
+        "rtwp-anomaly-demo-abc123", status="succeeded", finished_at="2026-08-17T10:05:00+00:00"
+    )
+
+    row = db.get_execution("rtwp-anomaly-demo-abc123")
+    assert row["status"] == "succeeded"
+    assert row["finished_at"] == "2026-08-17T10:05:00+00:00"
+
+
+def test_update_execution_status_does_not_affect_other_rows():
+    _insert_execution(job_name="macro-a-1")
+    _insert_execution(job_name="macro-b-1")
+
+    db.update_execution_status("macro-a-1", status="succeeded", finished_at="2026-08-17T10:05:00+00:00")
+
+    row_b = db.get_execution("macro-b-1")
+    assert row_b["status"] == "pending"
+    assert row_b["finished_at"] is None
+
+
 def test_init_db_adds_gitea_repo_url_to_a_pre_existing_table(tmp_path, monkeypatch):
     """A database file created before this column existed -- simulated by
     creating the table by hand without it -- gets the column added on the

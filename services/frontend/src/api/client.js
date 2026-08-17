@@ -169,6 +169,15 @@ export async function getExecutionStatus(token, jobName) {
   return response.json();
 }
 
+// Powers the History page (M6, continued) -- GET /executions returns every
+// recorded execution from the backend's SQLite executions table, most
+// recently created first, independent of whether the underlying Kubernetes
+// Job still exists (see docs/decisions/006-execution-history.md).
+export async function listExecutions(token) {
+  const response = await request("/executions", { token });
+  return response.json();
+}
+
 // Returns a Blob, not JSON -- GET /executions/{job_name}/result streams the
 // raw output CSV (text/csv), so this bypasses request()'s .json() call and
 // reads the body as a blob instead, ready to hand to a download link.

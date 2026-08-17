@@ -28,12 +28,13 @@ import { iconComponentFor } from "../icons";
 import MacroForm from "./MacroForm";
 import RunPanel from "./RunPanel";
 import ConfirmDeleteDialog from "./ConfirmDeleteDialog";
+import Nav from "./Nav";
 import { Pencil, Trash2, Plus, Play, ExternalLink, GitBranch } from "lucide-react";
 
 const CARD_TRANSITION = { type: "spring", stiffness: 420, damping: 38, mass: 0.7 };
 
-export default function CatalogPage() {
-  const { session, logout } = useAuth();
+export default function CatalogPage({ page, onNavigate }) {
+  const { session } = useAuth();
   const callProtected = useProtectedApi();
 
   const [macros, setMacros] = useState(null); // null = still loading
@@ -124,23 +125,7 @@ export default function CatalogPage() {
 
   return (
     <div className="min-h-screen bg-signal-950">
-      <header className="flex items-center justify-between border-b border-signal-700 px-6 py-4">
-        <span className="font-mono text-sm font-medium tracking-tight text-signal-100">
-          radio-maas
-        </span>
-        <div className="flex items-center gap-4">
-          <GiteaInstanceLink macros={macros} />
-          <span className="text-sm text-signal-400">
-            <span className="font-mono text-signal-200">{session.username}</span>
-          </span>
-          <button
-            onClick={logout}
-            className="text-sm text-signal-400 transition-colors hover:text-signal-100"
-          >
-            Sign out
-          </button>
-        </div>
-      </header>
+      <Nav page={page} onNavigate={onNavigate} giteaLink={<GiteaInstanceLink macros={macros} />} />
 
       <main className="mx-auto max-w-4xl px-6 py-10">
         <div className="mb-6 flex items-center justify-between">

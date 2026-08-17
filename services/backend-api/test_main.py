@@ -50,17 +50,14 @@ def gitea_disabled_by_default(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def registries_cleared(tmp_path, monkeypatch):
-    """The macro registry is a real SQLite file now (db.py) -- point it at a
-    fresh temp file per test, so one test's build/execution can't leak into
-    another's assertions and tests never touch the real registry.db.
-    JOB_TO_MACRO is still an in-memory dict (see main.py), reset the same way
-    as before.
+    """Both the macro registry and execution history are real SQLite tables
+    now (db.py) -- point DB_PATH at a fresh temp file per test, so one
+    test's build/execution can't leak into another's assertions and tests
+    never touch the real registry.db.
     """
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test_registry.db")
     db.init_db()
-    main.JOB_TO_MACRO.clear()
     yield
-    main.JOB_TO_MACRO.clear()
 
 
 def _upsert_macro(technical_name="rtwp-anomaly-demo", **overrides):
@@ -428,6 +425,214 @@ def test_create_execution_succeeds_for_a_built_macro():
     mock_batch_api.return_value.create_namespaced_job.assert_called_once()
 
 
+def test_create_execution_records_a_pending_row_in_the_executions_table():
+    _upsert_macro()
+
+    with (
+        patch("main.k8s_client.BatchV1Api"),
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/executions/rtwp-anomaly-demo", headers={"Authorization": f"Bearer {token}"}
+        )
+        job_name = response.json()["job_name"]
+
+    row = db.get_execution(job_name)
+    assert row is not None
+    assert row["macro_name"] == "rtwp-anomaly-demo"
+    assert row["status"] == "pending"
+    assert row["finished_at"] is None
+
+
+def test_get_execution_status_updates_the_row_to_succeeded():
+    _upsert_macro()
+    db.insert_execution(
+        "rtwp-anomaly-demo-abc123",
+        macro_name="rtwp-anomaly-demo",
+        status="pending",
+        created_at="2026-08-17T10:00:00+00:00",
+    )
+
+    fake_job = MagicMock()
+    fake_job.status = k8s_client.V1JobStatus(active=None, succeeded=1, failed=None)
+
+    with (
+        patch("main.k8s_client.BatchV1Api") as mock_batch_api,
+        TestClient(app) as client,
+    ):
+        mock_batch_api.return_value.read_namespaced_job_status.return_value = fake_job
+
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.get(
+            "/executions/rtwp-anomaly-demo-abc123", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
+    row = db.get_execution("rtwp-anomaly-demo-abc123")
+    assert row["status"] == "succeeded"
+    assert row["finished_at"] is not None
+
+
+def test_get_execution_status_updates_the_row_to_failed():
+    _upsert_macro()
+    db.insert_execution(
+        "rtwp-anomaly-demo-abc123",
+        macro_name="rtwp-anomaly-demo",
+        status="pending",
+        created_at="2026-08-17T10:00:00+00:00",
+    )
+
+    fake_job = MagicMock()
+    fake_job.status = k8s_client.V1JobStatus(active=None, succeeded=None, failed=1)
+
+    with (
+        patch("main.k8s_client.BatchV1Api") as mock_batch_api,
+        TestClient(app) as client,
+    ):
+        mock_batch_api.return_value.read_namespaced_job_status.return_value = fake_job
+
+        from auth import create_token
+
+        token = create_token("admin")
+        client.get(
+            "/executions/rtwp-anomaly-demo-abc123", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    row = db.get_execution("rtwp-anomaly-demo-abc123")
+    assert row["status"] == "failed"
+    assert row["finished_at"] is not None
+
+
+def test_get_execution_status_does_not_write_back_while_still_running():
+    """The response itself reflects live Kubernetes state ("running"), but
+    the executions row is only ever updated once the status is terminal
+    (succeeded/failed) -- there's nothing new worth persisting on every
+    single poll while a Job is still in flight.
+    """
+    _upsert_macro()
+    db.insert_execution(
+        "rtwp-anomaly-demo-abc123",
+        macro_name="rtwp-anomaly-demo",
+        status="pending",
+        created_at="2026-08-17T10:00:00+00:00",
+    )
+
+    fake_job = MagicMock()
+    fake_job.status = k8s_client.V1JobStatus(active=1, succeeded=None, failed=None)
+
+    with (
+        patch("main.k8s_client.BatchV1Api") as mock_batch_api,
+        TestClient(app) as client,
+    ):
+        mock_batch_api.return_value.read_namespaced_job_status.return_value = fake_job
+
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.get(
+            "/executions/rtwp-anomaly-demo-abc123", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.json()["status"] == "running"
+    row = db.get_execution("rtwp-anomaly-demo-abc123")
+    assert row["status"] == "pending"
+    assert row["finished_at"] is None
+
+
+def test_list_executions_is_empty_before_anything_runs():
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.get("/executions", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_list_executions_returns_recorded_rows_most_recent_first():
+    db.insert_execution(
+        "older-job", macro_name="cell-load-demo", status="succeeded", created_at="2026-08-01T00:00:00+00:00"
+    )
+    db.insert_execution(
+        "newer-job", macro_name="rtwp-anomaly-demo", status="pending", created_at="2026-08-09T00:00:00+00:00"
+    )
+
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.get("/executions", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    job_names = [row["job_name"] for row in response.json()]
+    assert job_names == ["newer-job", "older-job"]
+
+
+def test_list_executions_survives_a_fresh_testclient_instance():
+    db.insert_execution(
+        "rtwp-anomaly-demo-abc123",
+        macro_name="rtwp-anomaly-demo",
+        status="succeeded",
+        created_at="2026-08-17T10:00:00+00:00",
+    )
+
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        first_response = client.get("/executions", headers={"Authorization": f"Bearer {token}"})
+
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        second_response = client.get("/executions", headers={"Authorization": f"Bearer {token}"})
+
+    assert first_response.json() == second_response.json()
+    assert len(second_response.json()) == 1
+
+
+def test_get_execution_result_works_even_after_the_kubernetes_job_is_gone():
+    """The whole point of the executions table: the row (and therefore the
+    result lookup) survives independently of whether the Kubernetes Job
+    object itself still exists in the cluster.
+    """
+    db.insert_execution(
+        "rtwp-anomaly-demo-abc123",
+        macro_name="rtwp-anomaly-demo",
+        status="succeeded",
+        created_at="2026-08-17T10:00:00+00:00",
+    )
+
+    with (
+        patch("main.build_minio_client") as mock_build_client,
+        TestClient(app) as client,
+    ):
+        mock_response = MagicMock()
+        mock_response.stream.return_value = iter([b"cell_id,load_percent\n1,50\n"])
+        mock_client = MagicMock()
+        mock_client.get_object.return_value = mock_response
+        mock_build_client.return_value = mock_client
+
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.get(
+            "/executions/rtwp-anomaly-demo-abc123/result",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"cell_id,load_percent\n1,50\n"
+
+
 _RTWP_SOURCE = (
     "import pandas as pd\n"
     "df = pd.read_csv(path)\n"
@@ -585,7 +790,12 @@ def test_get_execution_result_404s_for_an_unknown_job_name():
 
 
 def test_get_execution_result_409s_when_output_object_does_not_exist_yet():
-    main.JOB_TO_MACRO["rtwp-anomaly-demo-abc123"] = "rtwp-anomaly-demo"
+    db.insert_execution(
+        "rtwp-anomaly-demo-abc123",
+        macro_name="rtwp-anomaly-demo",
+        status="running",
+        created_at="2026-08-17T10:00:00+00:00",
+    )
 
     with (
         patch("main.build_minio_client") as mock_build_client,
@@ -607,7 +817,12 @@ def test_get_execution_result_409s_when_output_object_does_not_exist_yet():
 
 
 def test_get_execution_result_returns_csv_when_output_exists():
-    main.JOB_TO_MACRO["rtwp-anomaly-demo-abc123"] = "rtwp-anomaly-demo"
+    db.insert_execution(
+        "rtwp-anomaly-demo-abc123",
+        macro_name="rtwp-anomaly-demo",
+        status="succeeded",
+        created_at="2026-08-17T10:00:00+00:00",
+    )
 
     with (
         patch("main.build_minio_client") as mock_build_client,

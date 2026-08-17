@@ -68,6 +68,19 @@ Gitea) and from the build pipeline itself (builder.py's docker build /
 k3d image import path is untouched). A Gitea failure is logged and never
 fails the build request -- the image already exists at that point, and
 that matters more than the mirror succeeding.
+
+M6 (continued): execution history moved to SQLite (db.py's `executions`
+table), replacing the in-memory JOB_TO_MACRO dict entirely -- see
+docs/decisions/006-execution-history.md. POST /executions/{macro_name}
+now INSERTs a row (status="pending") alongside creating the Job; GET
+/executions/{job_name} still queries Kubernetes for live status (a
+Job's actual state lives there while it's running, not in this table),
+but also UPDATEs the row once that status is succeeded or failed --
+that's what lets a completed execution's record outlive the Job itself
+once Kubernetes eventually garbage-collects it. GET /executions/{job_name}/result
+now looks the macro name up from this table too, instead of the old
+in-memory dict. New GET /executions lists every recorded execution,
+most recent first.
 """
 
 import csv
@@ -142,15 +155,8 @@ MINIO_SECRET_KEY: str | None = None
 MINIO_INPUT_BUCKET = "radio-data"
 MINIO_OUTPUT_BUCKET = "macro-results"
 
-# Built macros live in SQLite now (db.py), not an in-memory dict -- see the
-# M6 (continued) module docstring note above.
-#
-# JOB_TO_MACRO is still in-memory, deliberately: unlike the macro registry,
-# losing it on restart only means an in-flight execution's result can't be
-# looked up by job_name after a restart, which is a much smaller and more
-# tolerable gap than "the whole macro catalog goes empty." Worth moving to
-# SQLite too if that gap ever actually matters.
-JOB_TO_MACRO: dict[str, str] = {}
+# Built macros and execution history both live in SQLite now (db.py), not
+# in-memory dicts -- see the M6 (continued) module docstring notes above.
 
 # The same static wrapper template builder.py copies into every build
 # context -- read here too so the Gitea mirror's `wrapper.py` entry matches
@@ -236,6 +242,16 @@ class ExecutionStatus(BaseModel):
 
     job_name: str
     status: str
+
+
+class ExecutionRecord(BaseModel):
+    """One entry in the GET /executions history listing."""
+
+    job_name: str
+    macro_name: str
+    status: str
+    created_at: str
+    finished_at: str | None
 
 
 class MacroAnalysis(BaseModel):
@@ -420,6 +436,12 @@ def create_execution(macro_name: str) -> ExecutionCreated:
     doesn't exist, and the resulting Job would just fail in the cluster
     with a confusing ImagePullBackOff-style error instead of a clear
     "you haven't built this yet" at request time).
+
+    Records a "pending" row in the executions table right after the Job
+    is created -- see docs/decisions/006-execution-history.md for why this
+    table exists at all (it replaces an in-memory job_name -> macro_name
+    map that couldn't survive a restart or the Job itself being cleaned
+    up).
     """
     if db.get_macro(macro_name) is None:
         raise HTTPException(
@@ -432,7 +454,12 @@ def create_execution(macro_name: str) -> ExecutionCreated:
     batch_api = k8s_client.BatchV1Api()
     batch_api.create_namespaced_job(namespace=JOB_NAMESPACE, body=job)
 
-    JOB_TO_MACRO[job_name] = macro_name
+    db.insert_execution(
+        job_name,
+        macro_name=macro_name,
+        status="pending",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
 
     return ExecutionCreated(job_name=job_name)
 
@@ -443,7 +470,17 @@ def create_execution(macro_name: str) -> ExecutionCreated:
     dependencies=[Depends(get_current_user)],
 )
 def get_execution_status(job_name: str) -> ExecutionStatus:
-    """Look up a macro execution's current status by Job name."""
+    """Look up a macro execution's current status by Job name.
+
+    Still queries Kubernetes directly for the live status -- a Job's real
+    state while it's actively running lives there, not in the executions
+    table. But once that status is a terminal one (succeeded/failed), the
+    executions row is updated too (status + finished_at) -- this is what
+    lets the record answer correctly even after Kubernetes eventually
+    garbage-collects the Job object itself. A "pending"/"running" result
+    is deliberately not written back every poll -- there's nothing new to
+    persist until the status actually becomes terminal.
+    """
     batch_api = k8s_client.BatchV1Api()
     try:
         job = batch_api.read_namespaced_job_status(
@@ -454,7 +491,23 @@ def get_execution_status(job_name: str) -> ExecutionStatus:
             raise HTTPException(status_code=404, detail="job not found") from exc
         raise
 
-    return ExecutionStatus(job_name=job_name, status=map_job_status(job.status))
+    status = map_job_status(job.status)
+    if status in ("succeeded", "failed"):
+        db.update_execution_status(
+            job_name, status=status, finished_at=datetime.now(timezone.utc).isoformat()
+        )
+
+    return ExecutionStatus(job_name=job_name, status=status)
+
+
+@app.get(
+    "/executions",
+    response_model=list[ExecutionRecord],
+    dependencies=[Depends(get_current_user)],
+)
+def list_executions() -> list[ExecutionRecord]:
+    """List every recorded execution, most recently created first."""
+    return [ExecutionRecord(**dict(row)) for row in db.list_executions()]
 
 
 @app.post(
@@ -694,16 +747,16 @@ def get_execution_result(job_name: str) -> StreamingResponse:
     """Download a finished execution's output CSV from MinIO.
 
     404 if job_name was never recorded by create_execution (nothing in
-    JOB_TO_MACRO -- an unknown or mistyped job name), 409 if the macro is
-    known but its output object doesn't exist in MinIO yet (the execution
-    hasn't finished, or failed before uploading -- see
+    the executions table -- an unknown or mistyped job name), 409 if the
+    macro is known but its output object doesn't exist in MinIO yet (the
+    execution hasn't finished, or failed before uploading -- see
     templates/wrapper.py's upload-only-on-success behavior).
     """
-    macro_name = JOB_TO_MACRO.get(job_name)
-    if macro_name is None:
+    execution = db.get_execution(job_name)
+    if execution is None:
         raise HTTPException(status_code=404, detail="job not found")
 
-    object_key = f"{macro_name}/output.csv"
+    object_key = f"{execution['macro_name']}/output.csv"
     client = build_minio_client()
     try:
         response = client.get_object(MINIO_OUTPUT_BUCKET, object_key)

@@ -1,4 +1,4 @@
-"""Macro registry database (M6): SQLite storage for built macros.
+"""Macro registry database (M6): SQLite storage for built macros and executions.
 
 Replaces main.py's in-memory BUILT_MACROS dict, which lost every entry on
 restart -- exactly the bug this fixes (GET /macros returning empty after
@@ -6,6 +6,11 @@ any restart, even though images built in a prior process were still sitting
 in the cluster). SQLite is a single file (registry.db, gitignored -- this is
 local runtime state, not something to commit), created on first use via
 init_db(), no separate database service to stand up.
+
+M6 (continued): also stores execution history (the `executions` table),
+replacing main.py's in-memory JOB_TO_MACRO dict -- same restart-survival
+motivation as the macro registry, see
+docs/decisions/006-execution-history.md.
 
 Deliberately still a simplification, not a production datastore: no
 migrations framework (init_db()'s CREATE TABLE IF NOT EXISTS is the entire
@@ -76,6 +81,18 @@ def init_db() -> None:
         existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(macros)")}
         if "gitea_repo_url" not in existing_columns:
             conn.execute("ALTER TABLE macros ADD COLUMN gitea_repo_url TEXT")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS executions (
+                job_name TEXT PRIMARY KEY,
+                macro_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                finished_at TEXT
+            )
+            """
+        )
 
 
 def upsert_macro(
@@ -161,6 +178,46 @@ def update_gitea_url(technical_name: str, gitea_repo_url: str) -> None:
         conn.execute(
             "UPDATE macros SET gitea_repo_url = ? WHERE technical_name = ?",
             (gitea_repo_url, technical_name),
+        )
+
+
+def insert_execution(job_name: str, macro_name: str, status: str, created_at: str) -> None:
+    """Record a newly created execution. finished_at starts NULL -- an
+    execution isn't terminal yet the moment its Job is created.
+    """
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO executions (job_name, macro_name, status, created_at, finished_at)
+            VALUES (?, ?, ?, ?, NULL)
+            """,
+            (job_name, macro_name, status, created_at),
+        )
+
+
+def list_executions() -> list[sqlite3.Row]:
+    """All executions, most recently created first -- powers a history view."""
+    with _connect() as conn:
+        return conn.execute("SELECT * FROM executions ORDER BY created_at DESC").fetchall()
+
+
+def get_execution(job_name: str) -> sqlite3.Row | None:
+    """One execution's row, or None if job_name was never recorded."""
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT * FROM executions WHERE job_name = ?", (job_name,)
+        ).fetchone()
+
+
+def update_execution_status(job_name: str, status: str, finished_at: str | None) -> None:
+    """Update an execution's status (and finished_at, once it reaches a
+    terminal state) -- this is what lets the row outlive the Kubernetes Job
+    itself once Kubernetes eventually cleans the Job up.
+    """
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE executions SET status = ?, finished_at = ? WHERE job_name = ?",
+            (status, finished_at, job_name),
         )
 
 

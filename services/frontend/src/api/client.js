@@ -30,6 +30,34 @@ export class ValidationError extends Error {
   }
 }
 
+// Thrown by buildMacro's 422 case when the submitted source isn't valid
+// Python at all -- main.py's handle_macro_syntax_error returns
+// {error: "syntax_error", message, line, source_line} directly as the
+// response body (not wrapped in `detail`, since that response comes from
+// a FastAPI exception handler, not an HTTPException). Carries line/message
+// separately so MacroForm can render the "syntax error on line N" panel
+// instead of a generic error string.
+export class MacroSyntaxError extends Error {
+  constructor(message, line, sourceLine) {
+    super(message);
+    this.name = "MacroSyntaxError";
+    this.line = line;
+    this.sourceLine = sourceLine;
+  }
+}
+
+// Thrown by buildMacro's 422 case when the image build itself failed
+// (docker build / k3d image import exiting non-zero -- e.g. a
+// requirements.txt package that doesn't exist) -- distinct from
+// MacroSyntaxError so MacroForm can render the plain error panel instead
+// of the line-highlighting one.
+export class BuildFailedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "BuildFailedError";
+  }
+}
+
 async function request(
   path,
   { method = "GET", token, body, isFormData = false, treatUnauthorizedAsSessionExpiry = true } = {}
@@ -83,17 +111,50 @@ export async function listMacros(token) {
 // of M6's SQLite registry (main.py's BuildMacroRequest): display_name,
 // description, icon, and source_code all travel together now, not just
 // the raw source as a plain-text body like before the registry existed.
+//
+// Doesn't go through request()'s generic error handling for the 422
+// case: two different failure shapes both use 422, and they need to be
+// told apart to render different UI (see MacroSyntaxError/BuildFailedError
+// above). A syntax error comes from main.py's exception handler
+// (handle_macro_syntax_error) as a bare JSONResponse -- body IS
+// {error, message, line, source_line}, no `detail` wrapper, since that's
+// not an HTTPException. A build failure comes from an HTTPException with
+// a structured `detail` ({error: "build_failed", message}), same wrapping
+// pattern as uploadInput's ValidationError. Every other non-2xx (401, 400
+// invalid icon) still goes through the shared 401/error handling.
 export async function buildMacro(token, technicalName, { displayName, description, icon, sourceCode }) {
-  const response = await request(`/macros/${encodeURIComponent(technicalName)}/build`, {
+  const url = `${API_BASE_URL}/macros/${encodeURIComponent(technicalName)}/build`;
+  const response = await fetch(url, {
     method: "POST",
-    token,
-    body: {
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
       display_name: displayName,
       description,
       icon,
       source_code: sourceCode,
-    },
+    }),
   });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError();
+  }
+
+  if (response.status === 422) {
+    const body = await response.json().catch(() => null);
+    if (body?.error === "syntax_error") {
+      throw new MacroSyntaxError(body.message, body.line, body.source_line);
+    }
+    if (body?.detail?.error === "build_failed") {
+      throw new BuildFailedError(body.detail.message);
+    }
+    throw new Error(body?.detail || body?.message || "build failed");
+  }
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.detail || `request failed with status ${response.status}`);
+  }
+
   return response.json();
 }
 

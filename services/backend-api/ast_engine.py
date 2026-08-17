@@ -21,6 +21,24 @@ can and can't see.
 import ast
 
 
+class MacroSyntaxError(Exception):
+    """A macro script isn't valid Python at all -- ast.parse() itself failed.
+
+    Carries exactly what SyntaxError already exposes (.msg, .lineno, .text)
+    under clearer names, so a caller (main.py's exception handler) can
+    build a structured, actionable response instead of either a raw 500 or
+    an unhandled traceback reaching the client. Not a reimplementation of
+    anything CPython's parser already computes -- just a stable, named
+    carrier for those three fields across the analyze() boundary.
+    """
+
+    def __init__(self, message: str, line: int | None, source_line: str | None):
+        self.message = message
+        self.line = line
+        self.source_line = source_line.rstrip("\n") if source_line else source_line
+        super().__init__(f"line {line}: {message}")
+
+
 def analyze(source_code: str) -> dict:
     """Parse a macro script's structure: imports, likely required columns, output type.
 
@@ -34,8 +52,17 @@ def analyze(source_code: str) -> dict:
                 reference, deduplicated, in first-seen order.
             output_type: always "csv" for now — plot/json detection is left
                 for a later milestone.
+
+    Raises:
+        MacroSyntaxError: if source_code isn't valid Python at all. Raised
+            instead of letting ast.parse()'s SyntaxError propagate
+            unhandled -- see MacroSyntaxError's own docstring.
     """
-    tree = ast.parse(source_code)
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError as exc:
+        raise MacroSyntaxError(exc.msg, exc.lineno, exc.text) from exc
+
     imports = _collect_imports(tree)
     required_columns = _collect_required_columns(tree)
 

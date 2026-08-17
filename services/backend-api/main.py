@@ -96,7 +96,7 @@ from pathlib import Path
 
 import db
 import gitea_client
-from ast_engine import analyze, find_missing_columns
+from ast_engine import MacroSyntaxError, analyze, find_missing_columns
 from artifact_generator import generate_artifacts
 from auth import (
     ADMIN_PASSWORD_HASH,
@@ -110,7 +110,7 @@ from builder import build_and_import
 from db import InvalidIconError
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from minio import Minio
@@ -229,6 +229,30 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.exception_handler(MacroSyntaxError)
+async def handle_macro_syntax_error(request: Request, exc: MacroSyntaxError) -> JSONResponse:
+    """Turn an invalid macro script into a 422 a frontend can act on.
+
+    Applies to every route that lets analyze() raise -- POST
+    /macros/analyze and POST /macros/{technical_name}/build both call it
+    directly, and this handler catches it regardless of which one raised,
+    rather than each route needing its own try/except. Without this, an
+    unhandled SyntaxError-turned-MacroSyntaxError would fall through to
+    FastAPI's default 500 handler: an opaque "Internal Server Error" with
+    no line number, no message, nothing a user submitting bad source could
+    act on.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "syntax_error",
+            "message": exc.message,
+            "line": exc.line,
+            "source_line": exc.source_line,
+        },
+    )
 
 
 class ExecutionCreated(BaseModel):
@@ -539,6 +563,17 @@ async def build_macro(technical_name: str, body: BuildMacroRequest) -> MacroBuil
     db.upsert_macro itself (InvalidIconError), caught here and turned into
     an HTTP error rather than the 500 an unhandled exception would give.
 
+    A syntax error in body.source_code raises MacroSyntaxError out of
+    analyze() -- handled by handle_macro_syntax_error, not here (see that
+    handler; it covers this route and /macros/analyze identically). A
+    build failure that isn't a syntax error (docker build/k3d image
+    import exiting non-zero -- e.g. requirements.txt naming a package
+    that fails to install, see builder.py's own RuntimeError) is caught
+    here and turned into a 422 with a structured body instead of an
+    unhandled 500 -- the underlying RuntimeError's message is already
+    clear (builder.py's _run includes the failing step and stderr), this
+    just makes sure it reaches the client as JSON, not a stack trace.
+
     After a successful build, best-effort mirrors the generated artifacts
     into Gitea (ensure_repo + push_artifacts) and records the repo URL.
     This step runs after the registry row already exists and never raises
@@ -548,7 +583,13 @@ async def build_macro(technical_name: str, body: BuildMacroRequest) -> MacroBuil
     """
     analysis = analyze(body.source_code)
     artifacts = generate_artifacts(analysis)
-    image_tag = await run_in_threadpool(build_and_import, technical_name, body.source_code)
+    try:
+        image_tag = await run_in_threadpool(build_and_import, technical_name, body.source_code)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "build_failed", "message": str(exc)},
+        ) from exc
 
     now = datetime.now(timezone.utc).isoformat()
     try:

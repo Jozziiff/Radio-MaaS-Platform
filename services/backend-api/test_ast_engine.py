@@ -1,6 +1,8 @@
 """Tests for the AST analysis engine (M2). See ast_engine.py for module purpose."""
 
-from ast_engine import analyze, find_missing_columns
+import pytest
+
+from ast_engine import MacroSyntaxError, analyze, find_missing_columns
 
 
 def test_collects_plain_imports():
@@ -108,3 +110,49 @@ def test_find_missing_columns_is_case_sensitive():
 
 def test_find_missing_columns_with_no_required_columns():
     assert find_missing_columns([], ["anything"]) == []
+
+
+def test_analyze_raises_macro_syntax_error_for_a_dangling_if():
+    source = "if x:\n"
+
+    with pytest.raises(MacroSyntaxError) as exc_info:
+        analyze(source)
+
+    assert exc_info.value.line == 1
+    assert exc_info.value.message
+    assert exc_info.value.source_line is not None or exc_info.value.source_line == ""
+
+
+def test_analyze_raises_macro_syntax_error_for_a_missing_closing_paren():
+    source = "print('hello'\n"
+
+    with pytest.raises(MacroSyntaxError) as exc_info:
+        analyze(source)
+
+    assert exc_info.value.line == 1
+    assert "hello" in (exc_info.value.source_line or "")
+
+
+def test_macro_syntax_error_carries_the_offending_line_text():
+    source = "import os\ndf['col'] = = 1\n"
+
+    with pytest.raises(MacroSyntaxError) as exc_info:
+        analyze(source)
+
+    assert exc_info.value.line == 2
+    assert "df['col']" in exc_info.value.source_line
+
+
+def test_macro_syntax_error_str_includes_line_and_message():
+    source = "if x:\n"
+
+    with pytest.raises(MacroSyntaxError) as exc_info:
+        analyze(source)
+
+    text = str(exc_info.value)
+    assert str(exc_info.value.line) in text
+    assert exc_info.value.message in text
+
+
+def test_valid_source_does_not_raise_macro_syntax_error():
+    analyze("import os\nprint(os.getcwd())\n")

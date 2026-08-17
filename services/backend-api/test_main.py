@@ -280,6 +280,73 @@ def test_get_macro_returns_the_full_record_including_source_code():
     assert response.json()["source_code"] == "import os\nprint('hi')\n"
 
 
+def test_analyze_macro_returns_422_with_structured_body_for_a_syntax_error():
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/macros/analyze",
+            content=b"if x:\n",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "text/plain"},
+        )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "syntax_error"
+    assert body["line"] == 1
+    assert body["message"]
+    assert body["source_line"] == "if x:"
+
+
+def test_build_macro_returns_422_with_structured_body_for_a_syntax_error():
+    with TestClient(app) as client:
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/macros/rtwp-anomaly-demo/build",
+            json={
+                "display_name": "RTWP",
+                "description": "test",
+                "icon": "signal",
+                "source_code": "if x:\n",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "syntax_error"
+    assert body["line"] == 1
+    assert body["message"]
+
+
+def test_build_macro_returns_422_with_structured_body_when_the_image_build_fails():
+    with (
+        patch("main.build_and_import", side_effect=RuntimeError("docker build failed (exit code 1):\nno matching distribution found for not-a-real-package")),
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/macros/rtwp-anomaly-demo/build",
+            json={
+                "display_name": "RTWP",
+                "description": "test",
+                "icon": "signal",
+                "source_code": "import not_a_real_package\n",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 422
+    body = response.json()["detail"]
+    assert body["error"] == "build_failed"
+    assert "not-a-real-package" in body["message"]
+
+
 def test_build_macro_rejects_an_invalid_icon_with_400():
     with (
         patch("main.build_and_import", return_value="rtwp-anomaly-demo:generated"),

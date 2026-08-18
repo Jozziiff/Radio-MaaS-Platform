@@ -10,6 +10,7 @@ import { X, TriangleAlert } from "lucide-react";
 import { buildMacro, MacroSyntaxError, BuildFailedError } from "../api/client";
 import IconPicker from "./IconPicker";
 import Button from "../components/Button";
+import CodeEditor from "../components/CodeEditor";
 
 export default function MacroForm({
   token,
@@ -136,19 +137,17 @@ export default function MacroForm({
           <IconPicker value={icon} onChange={setIcon} />
 
           <div>
-            <label
-              htmlFor="macro-source"
-              className="mb-1.5 block text-xs font-medium text-signal-400"
-            >
+            {/* A plain <span>, not <label htmlFor>: Monaco renders its own
+                internal textarea with a generated id, so a `for` attribute
+                pointing at "macro-source" would no longer associate with
+                anything -- this stays a visual label only. */}
+            <span className="mb-1.5 block text-xs font-medium text-signal-400">
               Macro source (Python)
-            </label>
-            <textarea
-              id="macro-source"
+            </span>
+            <CodeEditor
               value={sourceCode}
-              onChange={(e) => setSourceCode(e.target.value)}
+              onChange={setSourceCode}
               placeholder="import pandas as pd&#10;&#10;# reads INPUT_PATH, writes OUTPUT_PATH"
-              rows={14}
-              className="w-full rounded-lg border border-signal-600 bg-signal-800 px-3 py-2 font-mono text-xs leading-relaxed text-signal-100 placeholder-signal-400 outline-none transition-colors focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
             />
           </div>
         </div>

@@ -31,16 +31,23 @@
 // disabled button, since a glowing-but-unusable control would be
 // misleading. Skipped on secondary/ghost/ghost-danger -- those aren't the
 // primary-action affordance a glow is meant to draw the eye to.
+//
+// No per-variant `disabled:cursor-not-allowed` here -- that's now a
+// global `button:disabled { cursor: not-allowed }` rule in index.css,
+// covering every button (including ghost/ghost-danger, which never had
+// the class here even though nothing stopped a future call site from
+// passing them a `disabled` prop) instead of relying on each variant to
+// remember it individually.
 const VARIANTS = {
   primary:
-    "bg-amber-500 text-signal-950 hover:bg-amber-400 hover:shadow-[0_0_24px_-4px_var(--color-amber-500)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:shadow-none",
+    "bg-amber-500 text-signal-950 hover:bg-amber-400 hover:shadow-[0_0_24px_-4px_var(--color-amber-500)] disabled:opacity-60 disabled:hover:shadow-none",
   secondary:
-    "border border-signal-600 text-signal-200 hover:bg-signal-800 disabled:cursor-not-allowed disabled:opacity-60",
+    "border border-signal-600 text-signal-200 hover:bg-signal-800 disabled:opacity-60",
   danger:
-    "bg-danger text-signal-950 hover:bg-danger/85 hover:shadow-[0_0_24px_-4px_var(--color-danger)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:shadow-none",
+    "bg-danger text-signal-950 hover:bg-danger/85 hover:shadow-[0_0_24px_-4px_var(--color-danger)] disabled:opacity-60 disabled:hover:shadow-none",
   ghost: "text-signal-400 hover:bg-signal-800 hover:text-signal-100",
   "ghost-danger": "text-signal-400 hover:bg-danger/15 hover:text-danger",
-  chip: "border border-amber-500/30 bg-amber-500/10 text-amber-500 hover:border-amber-500/60 hover:bg-amber-500/15 hover:shadow-[0_0_16px_-6px_var(--color-amber-500)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:shadow-none",
+  chip: "border border-amber-500/30 bg-amber-500/10 text-amber-500 hover:border-amber-500/60 hover:bg-amber-500/15 hover:shadow-[0_0_16px_-6px_var(--color-amber-500)] disabled:opacity-60 disabled:hover:shadow-none",
 };
 
 const SIZES = {

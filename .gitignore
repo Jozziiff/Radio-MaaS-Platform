@@ -51,6 +51,10 @@ docker-compose.override.yml
 *.db
 *.db-journal
 
+# fetch_towers.py's resume-progress sidecar (M6.75) -- local run state
+# for an interrupted OpenCelliD fetch, not something to commit.
+.fetch_towers_progress.json
+
 # Logs
 *.log
 

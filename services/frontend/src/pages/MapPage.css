@@ -1,0 +1,40 @@
+/* MapPage overrides (M6.75): leaflet.markercluster's default cluster-bubble
+   CSS (imported in MapPage.jsx) doesn't set a text color, and its inherited
+   default (black) is illegible against this app's dark theme once the map
+   itself sits inside a dark Card. Only the two things that actually need
+   fixing for legibility/consistency are touched here -- cluster-bubble text
+   color/weight and the popup's rounded corners/shadow to match the rest of
+   the app's Card styling -- not a full re-skin of Leaflet's control chrome
+   (zoom buttons, attribution bar), which already reads fine as-is. */
+
+.marker-cluster div {
+  color: #060a14;
+  font-weight: 600;
+  font-family: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+}
+
+.leaflet-popup-content-wrapper {
+  border-radius: 0.75rem;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+}
+
+.leaflet-popup-content {
+  margin: 0.75rem 1rem;
+}
+
+/* Adds a scale-in on top of Leaflet's own built-in opacity fade
+   (.leaflet-fade-anim, leaflet.css -- active by default via
+   MapContainer's fadeAnimation option, which we leave untouched) rather
+   than replacing it: composing a transform transition alongside Leaflet's
+   existing opacity one is simpler and less fragile than reimplementing
+   the fade from scratch. Scale starts slightly below 1 and settles at 1,
+   matching the same brief/subtle timing (0.2s) as Leaflet's own fade so
+   the two read as one motion, not two animations racing each other. */
+.leaflet-popup {
+  transform: scale(0.92);
+  transition: opacity 0.2s linear, transform 0.2s ease-out;
+}
+
+.leaflet-map-pane .leaflet-popup {
+  transform: scale(1);
+}

@@ -50,6 +50,36 @@ body {
   background: var(--color-signal-950);
 }
 
+/* Global pointer-cursor affordance -- Tailwind v4's preflight resets a
+   <button>'s other browser defaults (font, border-radius, background) but
+   deliberately leaves `cursor` alone, so a plain <button> actually
+   inherits the browser's native `cursor: default` (a plain arrow, not a
+   pointer) unless something sets it explicitly. This was previously
+   patched per-component (every Button.jsx variant listed its own
+   `disabled:cursor-not-allowed`) rather than fixed at the root, which
+   meant a variant that forgot the class (ghost/ghost-danger, until this
+   rule) silently had no not-allowed cursor if it were ever given a
+   `disabled` prop. One rule here covers every current and future
+   clickable element instead of relying on each one remembering to add it:
+   `button`/`[role="button"]` for real and ARIA-labeled buttons, `a[href]`
+   for real links (an `<a>` with no `href` isn't actually navigable and
+   shouldn't look clickable), and `[onclick]` for the (currently
+   nonexistent, but not guaranteed to stay that way) case of a non-button
+   element wired up with a raw click handler. `:disabled` is on `button`
+   only -- `[role="button"]`/`[onclick]` have no native disabled state,
+   and a link (`a[href]`) is either present (clickable) or absent
+   (already excluded above), never "disabled" in the DOM sense. */
+button,
+[role="button"],
+a[href],
+[onclick] {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
 /* Ambient glow blobs (AmbientGlow.jsx) -- large, heavily blurred radial
    gradients that drift very slowly. Sizes are viewport-relative (vmax) so
    the effect scales with window size instead of looking pinned/tiny on a

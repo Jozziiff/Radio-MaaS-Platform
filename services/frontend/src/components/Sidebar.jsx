@@ -9,7 +9,7 @@
 // so it belongs alongside Catalog/History rather than floating in a
 // per-page top bar.
 
-import { LayoutGrid, History, LogOut, Radio } from "lucide-react";
+import { LayoutGrid, History, Map, LogOut, Radio } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 
 export default function Sidebar({ page, onNavigate, giteaLink, className = "" }) {
@@ -41,6 +41,12 @@ export default function Sidebar({ page, onNavigate, giteaLink, className = "" })
           label="History"
           active={page === "history"}
           onClick={() => onNavigate("history")}
+        />
+        <SidebarLink
+          icon={Map}
+          label="Map"
+          active={page === "map"}
+          onClick={() => onNavigate("map")}
         />
       </nav>
 

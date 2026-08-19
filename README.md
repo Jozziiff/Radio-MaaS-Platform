@@ -453,9 +453,10 @@ radio-maas-platform/
   and roadmap
 - [`docs/decisions/`](docs/decisions/) — one write-up per milestone/decision:
   what was built, why, what was deliberately left out
-- `docs/RUNBOOK.md` — **does not exist yet.** There is currently no single
-  document describing day-to-day running/debugging steps beyond this README
-  and the per-milestone decision docs; if one gets written, link it here.
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — day-to-day running/debugging: a
+  symptom table, per-layer verification commands, and common recovery
+  actions (re-seeding Vault, recreating MinIO's buckets, recovering a
+  stranded k3d cluster)
 
 ## Running tests
 

@@ -132,6 +132,18 @@ export default function MapPage({ page, onNavigate }) {
     [activeRangeCellId]
   );
 
+  // Total count per radio type, over the full dataset -- not visibleTowers,
+  // so the legend always reads as "here's what's in the whole map," not a
+  // number that shrinks as filter pills are toggled off. Computed once
+  // (towers is a static build-time import, never changes at runtime).
+  const radioCounts = useMemo(() => {
+    const counts = {};
+    for (const tower of towers) {
+      counts[tower.radio] = (counts[tower.radio] ?? 0) + 1;
+    }
+    return counts;
+  }, []);
+
   // A tower whose radio type just got filtered out shouldn't leave its
   // range circle behind with no visible marker to have toggled it -- an
   // effect (not a plain conditional call during render, which risks an
@@ -250,7 +262,7 @@ export default function MapPage({ page, onNavigate }) {
             </MapContainer>
           </div>
 
-          <RadioLegend />
+          <RadioLegend radioCounts={radioCounts} />
           {rebuildingClusters && <RebuildingIndicator />}
         </Card>
       </main>
@@ -342,18 +354,23 @@ function RebuildingIndicator() {
   );
 }
 
-function RadioLegend() {
+function RadioLegend({ radioCounts }) {
   return (
     <div className="pointer-events-none absolute bottom-4 left-4 z-1000 rounded-lg border border-signal-700 bg-signal-900/90 px-3 py-2 text-xs text-signal-200 shadow-lg backdrop-blur-sm">
       <p className="mb-1.5 font-medium text-signal-100">Radio type</p>
       <div className="flex flex-col gap-1">
         {RADIO_LEGEND_ORDER.map((radio) => (
-          <div key={radio} className="flex items-center gap-2">
-            <span
-              className="h-2.5 w-2.5 shrink-0 rounded-full"
-              style={{ backgroundColor: radioColor(radio) }}
-            />
-            {radio}
+          <div key={radio} className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2">
+              <span
+                className="h-2.5 w-2.5 shrink-0 rounded-full"
+                style={{ backgroundColor: radioColor(radio) }}
+              />
+              {radio}
+            </span>
+            <span className="font-mono text-signal-400">
+              {(radioCounts[radio] ?? 0).toLocaleString()}
+            </span>
           </div>
         ))}
       </div>

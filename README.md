@@ -36,8 +36,9 @@ For the full mission, roadmap, and background context, see
 - **AST-based script analysis** — a macro's imports and the DataFrame
   columns it reads are detected by parsing (never executing) its source.
 - **Automated containerization** — a `Dockerfile`, `requirements.txt`, and
-  `rules.yaml` are generated from that analysis, built with `docker build`,
-  and imported straight into the local k3d cluster.
+  `rules.yaml` are generated from that analysis, then built by a one-shot
+  Kaniko Kubernetes Job (no Docker daemon or socket required anywhere in
+  this deployment) and pushed to an in-cluster image registry.
 - **CSV pre-validation on upload** — an input file's header is checked
   against the macro's detected required columns before it's stored,
   catching a mismatched file before a run even starts.
@@ -63,11 +64,13 @@ For the full mission, roadmap, and background context, see
 2. **Analyze** — the script is parsed with Python's `ast` module (never
    executed) to detect its imports and the DataFrame columns it reads.
 3. **Build** — a `Dockerfile`, `requirements.txt`, and `rules.yaml` are
-   generated from that analysis. The image is built and imported into the
-   local k3d cluster, the macro's metadata and source are upserted into the
-   SQLite registry, and — best-effort, never blocking the response — the
-   generated artifacts plus the macro's source are pushed to a per-macro
-   Gitea repo for version history.
+   generated from that analysis. The generated artifacts plus the macro's
+   source are pushed to a per-macro Gitea repo first (this is now a
+   *required* step, not best-effort — a Gitea push failure fails the whole
+   build request with a `422`), then a Kaniko Job clones that same Gitea
+   repo and pushes the built image to the in-cluster registry
+   (`registry:5000/{macro_name}:generated`). The macro's metadata and
+   source are then upserted into the SQLite registry.
 4. **Upload** — a CSV is uploaded for that macro. Its header row is checked
    against the columns `analyze()` detected as required; a mismatch is
    rejected with a 422 before anything is written to MinIO.
@@ -368,9 +371,11 @@ export GITEA_USERNAME=<the account you just created>
 export GITEA_TOKEN=<the token you just generated>
 ```
 
-If you skip this step, macro builds still succeed — the Gitea mirror push
-is best-effort and only logs a warning on failure (see
-[005-gitea-artifact-mirror.md](docs/decisions/005-gitea-artifact-mirror.md)).
+If you skip this step, macro builds will **fail**: since M7, Kaniko
+builds directly from the macro's Gitea repo, so the Gitea push is a
+required build dependency, not best-effort — a push failure fails the
+whole build request with a `422` (see
+[008-kaniko-instead-of-docker-socket.md](docs/decisions/008-kaniko-instead-of-docker-socket.md)).
 `GITEA_TOKEN` isn't Vault-sourced yet; it's a known, named gap, not an
 oversight.
 
@@ -422,8 +427,8 @@ wrong."
 | Gitea is reachable | `curl -o /dev/null -w '%{http_code}' http://localhost:3000` (with a port-forward) | `200` |
 | API is up | `curl localhost:8000/docs` | HTML page (Swagger UI), not a connection error |
 | Login works | `curl -X POST localhost:8000/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"devpassword123"}'` | `200`, `{"access_token": "..."}` |
-| Image was built | `docker images \| grep <macro_name>` | a `<macro_name>:generated` row |
-| Image reached the cluster | `docker exec k3d-radio-maas-server-0 crictl images \| grep <macro_name>` | same image, same ID as `docker images` |
+| Image was built and pushed | `curl -s -u "registry-push:$REGISTRY_PASSWORD" http://localhost:5000/v2/<macro_name>/tags/list` (with `kubectl port-forward svc/registry 5000:5000` running) | `{"name":"<macro_name>","tags":["generated"]}` |
+| Job pulled the image over the network | `kubectl describe pod -l job-name=<job_name>` | a `Successfully pulled image "registry:5000/<macro_name>:generated"` event |
 | Job ran | `kubectl get jobs` | `<macro_name>-xxxxxxxx`, `STATUS Complete`, `1/1` |
 | Execution history recorded it | `curl -H "Authorization: Bearer <token>" localhost:8000/executions` | the job listed with `"status": "succeeded"`, even after the Job itself is gone |
 | The actual result | `mc cat devminio/macro-results/<macro_name>/output.csv` | a CSV with the macro's extra output column(s) |
@@ -504,7 +509,7 @@ The response is the same shape as `/analyze` plus `image_tag`:
 
 ```json
 {
-  "image_tag": "rtwp-anomaly-demo:generated",
+  "image_tag": "registry:5000/rtwp-anomaly-demo:generated",
   "imports": ["os", "pandas"],
   "required_columns": ["cell_id", "rtwp_dbm"],
   "output_type": "csv",
@@ -527,7 +532,7 @@ returns `422`, as `{"detail": {"error": "build_failed", "message": ...}}`.
     "display_name": "RTWP Anomaly Detector",
     "description": "Flags cells with high uplink noise",
     "icon": "signal",
-    "image_tag": "rtwp-anomaly-demo:generated",
+    "image_tag": "registry:5000/rtwp-anomaly-demo:generated",
     "built_at": "2026-08-17T16:45:27+00:00",
     "updated_at": "2026-08-17T16:45:27+00:00",
     "gitea_repo_url": "http://localhost:3000/admin/rtwp-anomaly-demo"
@@ -580,10 +585,10 @@ has garbage-collected the underlying Job:
 |---|---|---|---|
 | `POST` | `/auth/login` | – | Exchange `{username, password}` for a JWT |
 | `POST` | `/macros/analyze` | ✅ | Analyze raw macro source: imports, required columns, generated artifacts |
-| `POST` | `/macros/{technical_name}/build` | ✅ | Analyze, build the image, import it into the cluster, upsert the registry, mirror to Gitea |
+| `POST` | `/macros/{technical_name}/build` | ✅ | Analyze, mirror to Gitea (required), build via Kaniko and push to the in-cluster registry, upsert the registry |
 | `GET` | `/macros` | ✅ | List every built macro |
 | `GET` | `/macros/{technical_name}` | ✅ | One macro's full record, including its source |
-| `DELETE` | `/macros/{technical_name}` | ✅ | Remove a macro's registry entry (best-effort local image cleanup) |
+| `DELETE` | `/macros/{technical_name}` | ✅ | Remove a macro's registry entry (does not delete its image from the in-cluster registry — known gap) |
 | `POST` | `/macros/{macro_name}/input` | ✅ | Upload a CSV; validated against required columns, then stored in MinIO |
 | `POST` | `/executions/{macro_name}` | ✅ | Run an already-built macro as a Kubernetes Job |
 | `GET` | `/executions/{job_name}` | ✅ | One execution's current status: `pending` / `running` / `succeeded` / `failed` |
@@ -632,7 +637,7 @@ radio-maas-platform/
 ## Running tests
 
 ```bash
-pytest services/backend-api/          # 145 tests: API routes, AST engine,
+pytest services/backend-api/          # 153 tests: API routes, AST engine,
                                        # builder, auth, Vault/Gitea clients,
                                        # the MinIO wrapper template
 pytest macros/cell-load-demo/
@@ -657,9 +662,11 @@ Frontend changes are currently verified manually against the running app.
 - **No persistent storage.** MinIO's and Gitea's data both live on
   `emptyDir` volumes — wiped on every pod restart, not just cluster
   recreation.
-- **No real image registry.** Macro images are imported directly into the
-  k3d cluster via `k3d image import`/local `docker build`, not pushed to
-  or pulled from a registry.
+- **No registry-side image cleanup.** `DELETE /macros/{technical_name}`
+  removes a macro's database row and Gitea reference, but does not delete
+  its built image from the in-cluster registry — that would need a
+  registry DELETE API call against `registry:5000`, not implemented. See
+  [008-kaniko-instead-of-docker-socket.md](docs/decisions/008-kaniko-instead-of-docker-socket.md).
 - **Gitea is for version history and visibility only.** It is not wired
   into the build/deploy pipeline or the GitOps loop — ArgoCD still watches
   GitHub for `infra/`, not Gitea. See

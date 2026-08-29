@@ -1,15 +1,22 @@
-"""Gitea artifact-mirror client (M6, continued): puts the deployed-but-unused
-Gitea instance from M5 to its first real use.
+"""Gitea artifact-mirror client (M6, continued; wiring changed in M7): puts
+the Gitea instance from M5 to real use as both a version-history mirror
+and, since M7, Kaniko's own build source.
 
-Gitea has been running in the cluster since M5 (infra/gitea.yaml) but
-nothing ever pushed to it -- ArgoCD watches GitHub for infra/, not Gitea
-(see docs/decisions/M5-gitops.md). This module is unrelated to that GitOps
-loop: it mirrors each built macro's generated artifacts (Dockerfile,
+Gitea has been running in the cluster since M5 (infra/gitea.yaml). This
+module pushes each built macro's generated artifacts (Dockerfile,
 requirements.txt, rules.yaml, macro.py, wrapper.py) into a per-macro Gitea
-repository for version history and visibility only. It does not trigger a
-build and is not wired into builder.py's docker build / k3d image import
-path in any way -- that pipeline runs exactly as it did before this module
-existed, regardless of whether the Gitea push below succeeds or fails.
+repository -- unrelated to the GitOps loop (ArgoCD watches GitHub for
+infra/, not Gitea, see docs/decisions/M5-gitops.md).
+
+M6: this push was best-effort and unrelated to the build pipeline --
+logged and swallowed on failure, and not wired into what actually built
+the image. M7 changed that (see
+docs/decisions/008-kaniko-instead-of-docker-socket.md): Kaniko's build
+Job clones this same Gitea repo as its build context, so the push here
+now happens *before* any build is attempted and is a required
+dependency, not a mirror of an already-built image -- a failure here now
+fails the whole `POST /macros/{technical_name}/build` request with a 422
+(see main.py's build_macro), instead of being logged and ignored.
 
 Reads GITEA_URL (default "http://gitea:3000", the in-cluster Service name
 from infra/gitea.yaml), GITEA_TOKEN, and GITEA_USERNAME (the account that
@@ -18,12 +25,15 @@ API) from the environment. Unlike JWT_SECRET and the MinIO credentials
 (both read from Vault since M4, see vault_client.py), GITEA_TOKEN is read
 directly from the environment -- a known, deliberate gap, not an
 oversight: moving it into Vault too would be a natural follow-up in M4's
-spirit, but doing so wasn't part of this task's scope.
+spirit, but doing so wasn't part of this task's scope. (Kaniko's own,
+separate Gitea read credential *is* Vault-sourced since M7 --
+vault_client.get_gitea_token() -- a new credential for a new consumer,
+not a retrofit of this one.)
 
 Every function here raises GiteaError on any failure (unreachable Gitea,
 an unexpected HTTP status). Callers that don't want a Gitea outage to
-affect their own request (see main.py's build_macro) must catch it
-themselves -- this module never swallows an error silently.
+affect their own request must catch it themselves -- this module never
+swallows an error silently.
 """
 
 import base64

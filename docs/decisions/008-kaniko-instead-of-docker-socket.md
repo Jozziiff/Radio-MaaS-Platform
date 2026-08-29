@@ -23,9 +23,14 @@ Kubernetes Job per build, pushing to a new in-cluster image registry.
 ## What was built
 
 - **`infra/registry.yaml`** — `registry:2` as a Deployment + ClusterIP
-  Service, GitOps-managed by the existing `radio-maas-infra` ArgoCD
-  Application (it already watches all of `infra/`, so no new Application
-  was needed). Requires htpasswd auth (`REGISTRY_AUTH=htpasswd`),
+  Service, designed to be GitOps-managed by the existing
+  `radio-maas-infra` ArgoCD Application once this branch is merged and
+  pushed (it already watches all of `infra/`, so no new Application is
+  needed). As of this branch's own work, that hasn't happened yet — this
+  branch has never been pushed to `origin/main`, so ArgoCD (which watches
+  GitHub) has never synced it; the live-cluster verification below (Task
+  7) applied it by hand via `kubectl apply`, not through the GitOps sync
+  path. Requires htpasswd auth (`REGISTRY_AUTH=htpasswd`),
   credential generated and stored in Vault (`secret/registry`), the same
   pattern every other credential in this project already follows. The
   Service's `clusterIP` is **pinned** to a fixed address
@@ -321,5 +326,8 @@ live cluster, after finding and fixing both bugs above:
    actual socket mounts or usage. No hostPath Docker socket mount exists
    anywhere in this deployment.
 
-`pytest services/backend-api/` — 154 passed, full suite, no regressions
-outside this change's own scope.
+`pytest services/backend-api/` — 153 passed, full suite, no regressions
+outside this change's own scope. (One test that asserted the old,
+now-removed `docker rmi` best-effort cleanup behavior in `delete_macro`
+was deleted as part of the final whole-branch review that followed this
+change — see that review's own fix report for detail.)

@@ -18,6 +18,13 @@ spec:
     repoURL: https://github.com/Jozziiff/Radio-MaaS-Platform.git
     targetRevision: HEAD
     path: infra
+    # infra/registries.yaml is a k3d/k3s-only containerd config file, not a
+    # Kubernetes manifest (no apiVersion/kind) -- ArgoCD's directory source
+    # parses every .yaml file under `path` by default, so without this
+    # exclude it would try to apply that file as a manifest and fail,
+    # breaking sync for this entire Application (MinIO/Vault/Gitea/registry).
+    directory:
+      exclude: registries.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: default

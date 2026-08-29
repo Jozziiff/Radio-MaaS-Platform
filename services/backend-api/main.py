@@ -10,8 +10,9 @@ separate refinement, not part of M2.
 Also exposes the AST-based analysis engine (ast_engine.py, artifact_generator.py):
 POST a raw macro script and get back its detected imports/columns plus the
 generated requirements.txt/Dockerfile/rules.yaml. And, via builder.py, an
-endpoint that goes one step further and actually builds + imports a runnable
-image from that analysis into the local k3d cluster.
+endpoint that goes one step further and actually builds that analysis into a
+runnable image (M7: pushed to the in-cluster registry via Kaniko -- see
+below).
 
 M3: the Job manifest no longer mounts the M1/M2 hostPath /data volume at
 all. Instead it sets MinIO connection env vars on the container; the image's
@@ -53,9 +54,9 @@ metadata a catalog card needs. See db.py for the schema and
 docs/decisions/ for the write-up.
 
 M6 (continued): DELETE /macros/{technical_name} removes a macro's
-registry row and best-effort removes its local `docker` image -- see the
-endpoint's own docstring for why the k3d-imported copy is a known,
-accepted gap rather than something this also cleans up.
+registry row (M7: see the endpoint's own docstring -- registry-side image
+cleanup in the in-cluster registry is a known, accepted gap, not
+something this also does).
 
 M6 (continued): POST /macros/{technical_name}/build now also mirrors a
 macro's generated artifacts into a per-macro Gitea repository
@@ -64,10 +65,9 @@ visibility only, per docs/decisions/005-gitea-artifact-mirror.md. This is
 the first time the Gitea instance deployed since M5
 (docs/decisions/M5-gitops.md) is actually used for anything; it remains
 disconnected from the GitOps loop (ArgoCD still watches GitHub, not
-Gitea) and from the build pipeline itself (builder.py's docker build /
-k3d image import path is untouched). A Gitea failure is logged and never
-fails the build request -- the image already exists at that point, and
-that matters more than the mirror succeeding.
+Gitea). M7 (see below): this Gitea push is no longer best-effort -- it
+became a required build dependency, and its own docstring note about a
+logged-and-swallowed failure no longer applies.
 
 M6 (continued): execution history moved to SQLite (db.py's `executions`
 table), replacing the in-memory JOB_TO_MACRO dict entirely -- see
@@ -81,13 +81,32 @@ once Kubernetes eventually garbage-collects it. GET /executions/{job_name}/resul
 now looks the macro name up from this table too, instead of the old
 in-memory dict. New GET /executions lists every recorded execution,
 most recent first.
+
+M7: replaced the docker/k3d build pipeline with Kaniko + an in-cluster
+registry (docs/decisions/008-kaniko-instead-of-docker-socket.md), so
+`backend-api` (and every pod in this deployment) never needs access to a
+Docker socket. POST /macros/{technical_name}/build now pushes the
+macro's generated artifacts to its Gitea repo first, then calls
+builder.build_and_push(), which runs a one-shot Kaniko Job that clones
+that same Gitea repo and pushes the built image to
+`registry:5000/{technical_name}:generated` -- no local `docker build` and
+no `k3d image import` anywhere any more. The Gitea push is now a
+*required* build dependency, not best-effort: a failure there fails the
+whole build request with a `build_failed` 422, instead of being logged
+and swallowed (the old M6 behavior). Execution Jobs (build_job_manifest)
+pull the built image from that same in-cluster registry with
+`imagePullPolicy: Always`, authenticated via the `registry-push-secret`
+Kubernetes Secret. DELETE /macros/{technical_name} only removes the
+macro's database row (and its Gitea reference); it does not delete the
+image from the in-cluster registry -- that would need a registry DELETE
+API call against `registry:5000`, not implemented here, a known,
+documented gap (see that endpoint's own docstring).
 """
 
 import csv
 import io
 import logging
 import os
-import subprocess
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -162,8 +181,9 @@ REGISTRY_HOST = "registry:5000"
 
 # Kubernetes Secret name both build_job_manifest's imagePullSecrets and
 # builder.py's Kaniko Job reference -- created once via
-# `kubectl create secret docker-registry ...` per docs/QUICKSTART.md's
-# registry-credential seeding step, not created by any code here.
+# `kubectl create secret docker-registry ...` per README.md's step 4b
+# ("Seed the registry credential") registry-credential seeding step, not
+# created by any code here.
 REGISTRY_PULL_SECRET = "registry-push-secret"
 
 # Built macros and execution history both live in SQLite now (db.py), not
@@ -642,42 +662,26 @@ def get_macro(technical_name: str) -> MacroDetail:
     dependencies=[Depends(get_current_user)],
 )
 def delete_macro(technical_name: str) -> MacroDeleted:
-    """Delete a macro's registry row, and best-effort remove its local docker image.
+    """Delete a macro's registry row (and its Gitea reference along with it).
 
     404s if technical_name isn't in the registry -- deleting something
     that was never built is a client error, not a no-op success.
 
-    The `docker rmi` is best-effort: if it fails (image already removed,
-    docker unreachable, whatever), that's logged and the request still
-    succeeds, since the registry row is the source of truth for what GET
-    /macros shows and that's already gone either way.
-
-    Known, accepted limitation, not a bug to chase: this does NOT remove
-    the image from the k3d cluster's internal containerd store -- `k3d
-    image import` (in builder.py) copies the image into every cluster
-    node's own containerd, a separate store `docker rmi` has no reach
-    into. A deleted-then-rebuilt macro with the same technical_name still
-    works correctly (the new `docker build` + `k3d image import` simply
-    overwrites that tag in containerd), so this doesn't cause incorrect
-    behavior -- it just means disk space in the cluster's nodes isn't
-    reclaimed on delete. Worth fixing once this stops being a single
-    local k3d cluster with no real storage pressure.
+    Known, accepted gap, not a bug to chase: this does NOT delete the
+    built image from the in-cluster registry (`registry:5000/{name}
+    :generated` -- see docs/decisions/008-kaniko-instead-of-docker-socket.md).
+    Doing that would mean issuing a registry DELETE API call against
+    `registry:5000` itself, which isn't implemented here. A
+    deleted-then-rebuilt macro with the same technical_name still works
+    correctly (Kaniko simply overwrites that tag in the registry on the
+    next build), so this doesn't cause incorrect behavior -- it just
+    means registry storage isn't reclaimed on delete.
     """
     deleted = db.delete_macro(technical_name)
     if not deleted:
         raise HTTPException(
             status_code=404, detail=f"macro '{technical_name}' has not been built"
         )
-
-    try:
-        subprocess.run(
-            ["docker", "rmi", f"{technical_name}:generated"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        logger.warning("docker rmi %s:generated failed, continuing: %s", technical_name, exc)
 
     return MacroDeleted(technical_name=technical_name)
 

@@ -1,6 +1,5 @@
 """Tests for the backend-api service (M2, updated M6). See main.py for module purpose."""
 
-import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -909,10 +908,7 @@ def test_get_execution_result_returns_csv_when_output_exists():
 
 
 def test_delete_macro_returns_404_for_an_unbuilt_macro():
-    with (
-        patch("main.subprocess.run") as mock_run,
-        TestClient(app) as client,
-    ):
+    with TestClient(app) as client:
         from auth import create_token
 
         token = create_token("admin")
@@ -921,16 +917,12 @@ def test_delete_macro_returns_404_for_an_unbuilt_macro():
         )
 
     assert response.status_code == 404
-    mock_run.assert_not_called()
 
 
 def test_delete_macro_removes_it_from_the_registry():
     _upsert_macro()
 
-    with (
-        patch("main.subprocess.run") as mock_run,
-        TestClient(app) as client,
-    ):
+    with TestClient(app) as client:
         from auth import create_token
 
         token = create_token("admin")
@@ -942,30 +934,4 @@ def test_delete_macro_removes_it_from_the_registry():
     assert delete_response.status_code == 200
     assert delete_response.json() == {"technical_name": "rtwp-anomaly-demo"}
     assert list_response.json() == []
-    mock_run.assert_called_once()
-    assert mock_run.call_args.args[0] == ["docker", "rmi", "rtwp-anomaly-demo:generated"]
-
-
-def test_delete_macro_succeeds_even_if_docker_rmi_fails():
-    """The docker rmi is best-effort -- a failure there must not fail the
-    whole request, since the registry row (the source of truth for GET
-    /macros) is already gone either way.
-    """
-    _upsert_macro()
-
-    with (
-        patch(
-            "main.subprocess.run",
-            side_effect=subprocess.CalledProcessError(1, ["docker", "rmi"]),
-        ),
-        TestClient(app) as client,
-    ):
-        from auth import create_token
-
-        token = create_token("admin")
-        response = client.delete(
-            "/macros/rtwp-anomaly-demo", headers={"Authorization": f"Bearer {token}"}
-        )
-
-    assert response.status_code == 200
     assert db.get_macro("rtwp-anomaly-demo") is None

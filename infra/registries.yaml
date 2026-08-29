@@ -1,0 +1,18 @@
+# M7 (production hardening): tells every k3d node's containerd to trust
+# registry:5000 (infra/registry.yaml) as an insecure (plain HTTP)
+# registry -- required for both Kaniko's image push and an execution
+# Job's image pull to work, since this registry has no TLS termination
+# in front of it (same "no TLS in-cluster" posture MinIO already has,
+# see main.py's build_minio_client comment).
+#
+# This is NOT a Kubernetes manifest -- it's consumed directly by k3d/k3s
+# itself (either at `k3d cluster create --registry-config
+# infra/registries.yaml`, or applied to an already-running cluster by
+# placing this file's content at /etc/rancher/k3s/registries.yaml inside
+# each node container and restarting the cluster -- verified NOT to
+# require a full delete/recreate, see docs/decisions/008-kaniko-instead-of-docker-socket.md and
+# docs/RUNBOOK.md's recovery steps).
+mirrors:
+  "registry:5000":
+    endpoint:
+      - "http://registry:5000"

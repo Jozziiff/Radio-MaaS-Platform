@@ -110,9 +110,21 @@ version of it.
 
 ### 1. Create the cluster
 
+For a **brand-new** cluster, pass `infra/registries.yaml` at creation time
+so containerd trusts the in-cluster registry (`registry:5000`,
+`infra/registry.yaml`) as insecure/plain-HTTP from the start — required
+before any Kaniko build or macro execution can push/pull images:
+
 ```bash
-k3d cluster create radio-maas
+k3d cluster create radio-maas --registry-config infra/registries.yaml
 ```
+
+If you already have an **existing** cluster from before this file
+existed, see "Applying `infra/registries.yaml` to an existing cluster"
+below instead — **this does not require deleting or recreating the
+cluster**, unlike this repo's other "when in doubt, delete and recreate"
+precedent for a stranded cluster (see [RUNBOOK.md](docs/RUNBOOK.md)'s
+symptom table).
 
 ### 2. Bootstrap ArgoCD, then let it take over `infra/`
 
@@ -234,6 +246,32 @@ vault kv put secret/gitea token="<the same Gitea access token from step 5>"
 
 (Seed this after completing step 5 below, once that token exists — listed
 here only to keep it next to the other one-time Vault-seeding steps.)
+
+### 4d. Applying `infra/registries.yaml` to an existing cluster
+
+If your cluster was created before `infra/registries.yaml` existed (or
+you skipped `--registry-config` in step 1), containerd doesn't yet trust
+`registry:5000` as insecure — apply it directly to the running node.
+**Verified against this project's real cluster: this only needs a soft
+restart, not a full `k3d cluster delete`/`create`:**
+
+```bash
+docker cp infra/registries.yaml k3d-radio-maas-server-0:/etc/rancher/k3s/registries.yaml
+k3d cluster stop radio-maas
+k3d cluster start radio-maas
+```
+
+Confirm containerd picked it up:
+
+```bash
+docker exec k3d-radio-maas-server-0 cat "/var/lib/rancher/k3s/agent/etc/containerd/certs.d/registry:5000/hosts.toml"
+```
+
+Expect a generated `hosts.toml` naming `http://registry:5000`. This is a
+one-time step per cluster — the config lives on the node's filesystem,
+not in an `emptyDir` volume, so (unlike the Vault/MinIO/registry secrets
+above) it survives ordinary pod restarts; it's only lost if the cluster
+itself is deleted and recreated.
 
 ### 5. Set up Gitea — manual, can't be scripted
 

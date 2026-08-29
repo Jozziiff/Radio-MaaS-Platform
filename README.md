@@ -667,9 +667,15 @@ Frontend changes are currently verified manually against the running app.
   its built image from the in-cluster registry — that would need a
   registry DELETE API call against `registry:5000`, not implemented. See
   [008-kaniko-instead-of-docker-socket.md](docs/decisions/008-kaniko-instead-of-docker-socket.md).
-- **Gitea is for version history and visibility only.** It is not wired
-  into the build/deploy pipeline or the GitOps loop — ArgoCD still watches
-  GitHub for `infra/`, not Gitea. See
+- **Gitea is a required build dependency, but not part of the GitOps
+  loop.** Since M7, Kaniko clones a macro's Gitea repo as its build
+  context — a Gitea push failure now fails the whole build (see "How it
+  works" above and
+  [008-kaniko-instead-of-docker-socket.md](docs/decisions/008-kaniko-instead-of-docker-socket.md)).
+  That's separate from infrastructure GitOps: ArgoCD still watches GitHub
+  for `infra/`, not Gitea — Gitea's role stays scoped to per-macro build
+  context and version history, it was never meant to replace the
+  infra-level GitOps loop. See
   [005-gitea-artifact-mirror.md](docs/decisions/005-gitea-artifact-mirror.md).
 - **`GITEA_TOKEN` is a plain environment variable, not Vault-sourced** —
   unlike the JWT signing key and MinIO credentials, which are.

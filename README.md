@@ -174,6 +174,67 @@ vault kv put secret/minio access_key=devadmin secret_key=devpassword123
 `backend-api` reads both of these once at its own startup
 (`vault_client.py`) and fails to start if either is missing.
 
+### 4b. Seed the registry credential — **required on every fresh cluster**
+
+`infra/registry.yaml` (the in-cluster image registry Kaniko pushes built
+macro images to, and execution Jobs pull them from — see
+[008-kaniko-instead-of-docker-socket.md](decisions/008-kaniko-instead-of-docker-socket.md))
+requires htpasswd auth. Like the registry's own storage, none of this
+survives a pod restart, so it must be regenerated on every fresh cluster,
+same as step 4 above:
+
+```bash
+# 1. Generate a real credential and store it in Vault (source of truth)
+REGISTRY_PASSWORD=$(openssl rand -hex 20)
+vault kv put secret/registry username=registry-push password="$REGISTRY_PASSWORD"
+
+# 2. Generate the htpasswd file the registry pod itself needs
+docker run --rm --entrypoint htpasswd httpd:2 -Bbn registry-push "$REGISTRY_PASSWORD" > /tmp/registry.htpasswd
+kubectl create secret generic registry-htpasswd --from-file=htpasswd=/tmp/registry.htpasswd
+rm -f /tmp/registry.htpasswd
+
+# 3. Create the docker-registry-type Secret Kaniko's push and execution
+#    Jobs' pulls both use (a different Secret type from step 2 above --
+#    step 2 is consumed by the registry pod itself; this one by clients
+#    of the registry)
+kubectl create secret docker-registry registry-push-secret \
+  --docker-server=registry:5000 \
+  --docker-username=registry-push \
+  --docker-password="$REGISTRY_PASSWORD" \
+  --docker-email=noreply@example.invalid
+
+unset REGISTRY_PASSWORD
+```
+
+Verify it worked:
+
+```bash
+kubectl get pods -l app=registry   # expect Running, 1/1
+kubectl port-forward svc/registry 5000:5000 &
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:5000/v2/_catalog       # expect 401 (unauthenticated)
+curl -s -u "registry-push:$REGISTRY_PASSWORD" -o /dev/null -w "%{http_code}\n" http://localhost:5000/v2/_catalog  # expect 200
+```
+
+All three (the Vault secret, `registry-htpasswd`, and `registry-push-secret`)
+must be regenerated together from the same password — if you re-seed
+`secret/registry` with a new password without regenerating both Kubernetes
+Secrets to match, builds and pulls will fail with a registry `401`. See
+[RUNBOOK.md](RUNBOOK.md)'s symptom table.
+
+### 4c. Seed Kaniko's own Gitea read credential — **required on every fresh cluster**
+
+Separate from the `GITEA_TOKEN` env var `backend-api` itself uses (step 5
+below) — this is a second, distinct Vault-sourced credential specifically
+for the Kaniko build Job's own git clone step, injected into that Job's
+environment rather than `backend-api`'s process environment:
+
+```bash
+vault kv put secret/gitea token="<the same Gitea access token from step 5>"
+```
+
+(Seed this after completing step 5 below, once that token exists — listed
+here only to keep it next to the other one-time Vault-seeding steps.)
+
 ### 5. Set up Gitea — manual, can't be scripted
 
 Gitea (`infra/gitea.yaml`) comes up with `INSTALL_LOCK=true`, so it skips

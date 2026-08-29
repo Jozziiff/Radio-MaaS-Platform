@@ -1,0 +1,70 @@
+# M7 (production hardening): the in-cluster image registry Kaniko pushes
+# built macro images to, and execution Jobs pull them from -- replaces
+# `docker build` + `k3d image import`, which required host Docker socket
+# access. See docs/decisions/008-kaniko-instead-of-docker-socket.md.
+#
+# Deployment (not a Job) because this is a long-lived service, same
+# reasoning as infra/minio.yaml, infra/vault.yaml, infra/gitea.yaml.
+#
+# htpasswd auth, not open access: this project's other in-cluster
+# services (MinIO, Vault, Gitea) all have real credentials on top of
+# their ClusterIP-only network isolation -- the registry follows the
+# same posture rather than being the one exception. Network isolation
+# alone is defense-in-depth here, not a substitute for auth.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      containers:
+        - name: registry
+          image: registry:2
+          env:
+            - name: REGISTRY_AUTH
+              value: htpasswd
+            - name: REGISTRY_AUTH_HTPASSWD_REALM
+              value: "radio-maas-registry"
+            - name: REGISTRY_AUTH_HTPASSWD_PATH
+              value: /auth/htpasswd
+          ports:
+            - containerPort: 5000
+              name: http
+          volumeMounts:
+            - name: auth
+              mountPath: /auth
+              readOnly: true
+      volumes:
+        - name: auth
+          secret:
+            # Populated by Task 2's `kubectl create secret generic
+            # registry-htpasswd --from-file=htpasswd=...` -- the
+            # Deployment references this Secret by name; it must exist
+            # before this pod can start (same bring-up-order dependency
+            # Vault/MinIO seeding already has for backend-api).
+            secretName: registry-htpasswd
+---
+# ClusterIP: reachable only from inside the cluster at registry:5000 --
+# same pattern as every other infra/*.yaml Service. Combined with
+# htpasswd auth above: network isolation as defense-in-depth on top of
+# real credentials, not instead of them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+spec:
+  type: ClusterIP
+  selector:
+    app: registry
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000

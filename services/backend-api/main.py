@@ -92,7 +92,6 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 
 import db
 import gitea_client
@@ -106,7 +105,7 @@ from auth import (
     set_jwt_secret,
     verify_password,
 )
-from builder import build_and_import
+from builder import build_and_push
 from db import InvalidIconError
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -155,14 +154,20 @@ MINIO_SECRET_KEY: str | None = None
 MINIO_INPUT_BUCKET = "radio-data"
 MINIO_OUTPUT_BUCKET = "macro-results"
 
+# The in-cluster registry Kaniko pushes built images to (builder.py) and
+# execution Jobs pull them from -- see infra/registry.yaml,
+# docs/decisions/008-kaniko-instead-of-docker-socket.md. Not a secret
+# (an address, like JOB_MINIO_ENDPOINT), so it stays a plain constant.
+REGISTRY_HOST = "registry:5000"
+
+# Kubernetes Secret name both build_job_manifest's imagePullSecrets and
+# builder.py's Kaniko Job reference -- created once via
+# `kubectl create secret docker-registry ...` per docs/QUICKSTART.md's
+# registry-credential seeding step, not created by any code here.
+REGISTRY_PULL_SECRET = "registry-push-secret"
+
 # Built macros and execution history both live in SQLite now (db.py), not
 # in-memory dicts -- see the M6 (continued) module docstring notes above.
-
-# The same static wrapper template builder.py copies into every build
-# context -- read here too so the Gitea mirror's `wrapper.py` entry matches
-# exactly what actually got built into the image, not a second copy that
-# could drift from it.
-_WRAPPER_TEMPLATE_PATH = Path(__file__).parent / "templates" / "wrapper.py"
 
 
 def _mask(secret: str) -> str:
@@ -370,9 +375,11 @@ def build_job_manifest(macro_name: str, job_name: str) -> k8s_client.V1Job:
 
     Args:
         macro_name: Identifies which macro to run. Selects the image
-            ("{macro_name}:generated", the tag `build_and_import` produces)
-            and the per-macro object keys in MinIO, so different macros'
-            input/output objects don't collide in the shared buckets.
+            ("{REGISTRY_HOST}/{macro_name}:generated", the tag
+            `build_and_push` produces and pushes to the in-cluster
+            registry) and the per-macro object keys in MinIO, so
+            different macros' input/output objects don't collide in the
+            shared buckets.
         job_name: Unique name for this Job (callers must ensure uniqueness,
             since Kubernetes Job names must be unique within a namespace).
 
@@ -381,8 +388,8 @@ def build_job_manifest(macro_name: str, job_name: str) -> k8s_client.V1Job:
     """
     container = k8s_client.V1Container(
         name=macro_name,
-        image=f"{macro_name}:generated",
-        image_pull_policy="Never",
+        image=f"{REGISTRY_HOST}/{macro_name}:generated",
+        image_pull_policy="Always",
         env=[
             k8s_client.V1EnvVar(name="MINIO_ENDPOINT", value=JOB_MINIO_ENDPOINT),
             k8s_client.V1EnvVar(name="MINIO_ACCESS_KEY", value=MINIO_ACCESS_KEY),
@@ -401,6 +408,7 @@ def build_job_manifest(macro_name: str, job_name: str) -> k8s_client.V1Job:
     pod_spec = k8s_client.V1PodSpec(
         restart_policy="Never",
         containers=[container],
+        image_pull_secrets=[k8s_client.V1LocalObjectReference(name=REGISTRY_PULL_SECRET)],
     )
 
     return k8s_client.V1Job(
@@ -553,7 +561,7 @@ async def analyze_macro(request: Request) -> MacroAnalysis:
     dependencies=[Depends(get_current_user)],
 )
 async def build_macro(technical_name: str, body: BuildMacroRequest) -> MacroBuilt:
-    """Analyze, build, and import a macro's image, then UPSERT it into the registry.
+    """Analyze, push to Gitea, build via Kaniko, and UPSERT into the registry.
 
     UPSERT (see db.upsert_macro) rather than insert-only: rebuilding an
     existing technical_name overwrites its row instead of erroring, which
@@ -565,26 +573,18 @@ async def build_macro(technical_name: str, body: BuildMacroRequest) -> MacroBuil
 
     A syntax error in body.source_code raises MacroSyntaxError out of
     analyze() -- handled by handle_macro_syntax_error, not here (see that
-    handler; it covers this route and /macros/analyze identically). A
-    build failure that isn't a syntax error (docker build/k3d image
-    import exiting non-zero -- e.g. requirements.txt naming a package
-    that fails to install, see builder.py's own RuntimeError) is caught
-    here and turned into a 422 with a structured body instead of an
-    unhandled 500 -- the underlying RuntimeError's message is already
-    clear (builder.py's _run includes the failing step and stderr), this
-    just makes sure it reaches the client as JSON, not a stack trace.
-
-    After a successful build, best-effort mirrors the generated artifacts
-    into Gitea (ensure_repo + push_artifacts) and records the repo URL.
-    This step runs after the registry row already exists and never raises
-    past this function -- a Gitea outage is logged and otherwise invisible
-    to the caller, since the image build (already complete by this point)
-    is what actually matters for the response to be a success.
+    handler; it covers this route and /macros/analyze identically). Any
+    other build failure -- a required Gitea push failing (see
+    builder.build_and_push's own docstring: Gitea is now a required
+    dependency, not best-effort), or the Kaniko Job itself failing (e.g.
+    requirements.txt naming a package that fails to install) -- is caught
+    here as a RuntimeError and turned into a 422 with a structured body
+    instead of an unhandled 500.
     """
     analysis = analyze(body.source_code)
     artifacts = generate_artifacts(analysis)
     try:
-        image_tag = await run_in_threadpool(build_and_import, technical_name, body.source_code)
+        image_tag = await run_in_threadpool(build_and_push, technical_name, body.source_code)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=422,
@@ -606,32 +606,9 @@ async def build_macro(technical_name: str, body: BuildMacroRequest) -> MacroBuil
     except InvalidIconError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    try:
-        repo_url = await run_in_threadpool(_mirror_to_gitea, technical_name, body.source_code, artifacts)
-        db.update_gitea_url(technical_name, repo_url)
-    except gitea_client.GiteaError as exc:
-        logger.error("Gitea mirror failed for '%s', continuing: %s", technical_name, exc)
+    db.update_gitea_url(technical_name, f"{gitea_client.GITEA_URL}/{gitea_client.GITEA_USERNAME}/{technical_name}")
 
     return MacroBuilt(image_tag=image_tag, **analysis, artifacts=artifacts)
-
-
-def _mirror_to_gitea(technical_name: str, source_code: str, artifacts: dict[str, str]) -> str:
-    """Push a macro's generated artifacts plus its source and the MinIO
-    wrapper into its Gitea repo (creating the repo first if needed).
-
-    A plain function, not inlined into build_macro, so it can run inside
-    run_in_threadpool alongside build_and_import -- gitea_client's calls
-    are synchronous (requests), same reasoning as build_and_import's own
-    subprocess calls.
-    """
-    repo_url = gitea_client.ensure_repo(technical_name)
-    files = {
-        **artifacts,
-        "macro.py": source_code,
-        "wrapper.py": _WRAPPER_TEMPLATE_PATH.read_text(),
-    }
-    gitea_client.push_artifacts(technical_name, files)
-    return repo_url
 
 
 @app.get(

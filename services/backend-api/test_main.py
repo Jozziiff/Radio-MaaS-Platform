@@ -33,18 +33,15 @@ def minio_credentials_loaded():
 
 
 @pytest.fixture(autouse=True)
-def gitea_disabled_by_default(monkeypatch):
-    """Make build_macro's Gitea mirror step fail immediately, with no real
-    network call, unless a test explicitly patches main.gitea_client
-    itself. Without this, a build_macro test would either depend on
-    whatever GITEA_URL/GITEA_TOKEN happen to be set in the environment
-    actually running the tests, or make a real (slow, flaky in CI)
-    connection attempt to a Gitea that isn't there.
+def build_and_push_succeeds_by_default(monkeypatch):
+    """Most build_macro tests don't care about builder.build_and_push's
+    internals (Gitea push + Kaniko Job, both tested in test_builder.py)
+    -- default it to a clean success so those tests aren't coupled to
+    Gitea/Kaniko mocking they don't need. Tests that DO care patch
+    main.build_and_push directly, overriding this default.
     """
     monkeypatch.setattr(
-        main.gitea_client,
-        "ensure_repo",
-        MagicMock(side_effect=gitea_client.GiteaError("gitea disabled in tests")),
+        main, "build_and_push", lambda macro_name, source_code: f"registry:5000/{macro_name}:generated"
     )
 
 
@@ -99,8 +96,16 @@ def test_build_job_manifest_uses_generated_image_for_the_macro():
 
     container = job.spec.template.spec.containers[0]
 
-    assert container.image == "rtwp-anomaly-demo:generated"
-    assert container.image_pull_policy == "Never"
+    assert container.image == "registry:5000/rtwp-anomaly-demo:generated"
+    assert container.image_pull_policy == "Always"
+
+
+def test_build_job_manifest_sets_registry_pull_secret():
+    job = build_job_manifest("rtwp-anomaly-demo", "rtwp-anomaly-demo-abc123")
+
+    pull_secrets = job.spec.template.spec.image_pull_secrets
+    assert len(pull_secrets) == 1
+    assert pull_secrets[0].name == "registry-push-secret"
 
 
 def test_build_job_manifest_sets_minio_object_keys_scoped_per_macro():
@@ -324,7 +329,7 @@ def test_build_macro_returns_422_with_structured_body_for_a_syntax_error():
 
 def test_build_macro_returns_422_with_structured_body_when_the_image_build_fails():
     with (
-        patch("main.build_and_import", side_effect=RuntimeError("docker build failed (exit code 1):\nno matching distribution found for not-a-real-package")),
+        patch("main.build_and_push", side_effect=RuntimeError("Kaniko build failed for Job 'rtwp-anomaly-demo-build':\nerror: no matching distribution found for not-a-real-package")),
         TestClient(app) as client,
     ):
         from auth import create_token
@@ -347,9 +352,39 @@ def test_build_macro_returns_422_with_structured_body_when_the_image_build_fails
     assert "not-a-real-package" in body["message"]
 
 
+def test_build_macro_returns_422_when_the_required_gitea_push_fails():
+    """Since Gitea is now required (build_and_push pushes to Gitea before
+    Kaniko can build from it -- see docs/decisions/008-....md), a Gitea
+    failure surfaces through the same build_failed 422 shape as any other
+    build failure, not a silently-swallowed log line.
+    """
+    with (
+        patch("main.build_and_push", side_effect=RuntimeError("Gitea push failed, cannot build without a build context: bad token")),
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("admin")
+        response = client.post(
+            "/macros/rtwp-anomaly-demo/build",
+            json={
+                "display_name": "RTWP",
+                "description": "test",
+                "icon": "signal",
+                "source_code": "import pandas as pd\n",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 422
+    body = response.json()["detail"]
+    assert body["error"] == "build_failed"
+    assert "Gitea" in body["message"]
+
+
 def test_build_macro_rejects_an_invalid_icon_with_400():
     with (
-        patch("main.build_and_import", return_value="rtwp-anomaly-demo:generated"),
+        patch("main.build_and_push", return_value="rtwp-anomaly-demo:generated"),
         TestClient(app) as client,
     ):
         from auth import create_token
@@ -371,7 +406,7 @@ def test_build_macro_rejects_an_invalid_icon_with_400():
 
 def test_build_macro_upserts_full_metadata_into_the_registry():
     with (
-        patch("main.build_and_import", return_value="rtwp-anomaly-demo:generated"),
+        patch("main.build_and_push", return_value="rtwp-anomaly-demo:generated"),
         TestClient(app) as client,
     ):
         from auth import create_token
@@ -396,13 +431,9 @@ def test_build_macro_upserts_full_metadata_into_the_registry():
     assert macros[0]["icon"] == "signal"
 
 
-def test_build_macro_records_gitea_repo_url_on_a_successful_mirror():
-    with (
-        patch("main.build_and_import", return_value="rtwp-anomaly-demo:generated"),
-        patch("main.gitea_client.ensure_repo", return_value="http://gitea:3000/admin/rtwp-anomaly-demo"),
-        patch("main.gitea_client.push_artifacts") as mock_push,
-        TestClient(app) as client,
-    ):
+def test_build_macro_records_gitea_repo_url_on_success(monkeypatch):
+    monkeypatch.setattr(gitea_client, "GITEA_USERNAME", "admin")
+    with TestClient(app) as client:
         from auth import create_token
 
         token = create_token("admin")
@@ -419,47 +450,7 @@ def test_build_macro_records_gitea_repo_url_on_a_successful_mirror():
         list_response = client.get("/macros", headers={"Authorization": f"Bearer {token}"})
 
     assert build_response.status_code == 200
-    mock_push.assert_called_once()
-    pushed_files = mock_push.call_args.args[1]
-    assert set(pushed_files) == {
-        "Dockerfile",
-        "requirements.txt",
-        "rules.yaml",
-        "macro.py",
-        "wrapper.py",
-    }
-    assert pushed_files["macro.py"] == "import pandas as pd\n"
     assert list_response.json()[0]["gitea_repo_url"] == "http://gitea:3000/admin/rtwp-anomaly-demo"
-
-
-def test_build_macro_succeeds_even_when_gitea_mirror_fails():
-    """The image build/registry upsert already succeeded by the time the
-    Gitea mirror runs -- a Gitea failure (bad/missing token, unreachable
-    Gitea, etc.) must be logged and swallowed, not turned into a failed
-    build response. gitea_repo_url simply stays unset.
-    """
-    with (
-        patch("main.build_and_import", return_value="rtwp-anomaly-demo:generated"),
-        patch("main.gitea_client.ensure_repo", side_effect=gitea_client.GiteaError("bad token")),
-        TestClient(app) as client,
-    ):
-        from auth import create_token
-
-        token = create_token("admin")
-        build_response = client.post(
-            "/macros/rtwp-anomaly-demo/build",
-            json={
-                "display_name": "RTWP Anomaly Detector",
-                "description": "Flags cells with high uplink noise.",
-                "icon": "signal",
-                "source_code": "import pandas as pd\n",
-            },
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        list_response = client.get("/macros", headers={"Authorization": f"Bearer {token}"})
-
-    assert build_response.status_code == 200
-    assert list_response.json()[0]["gitea_repo_url"] is None
 
 
 def test_create_execution_returns_404_for_an_unbuilt_macro():

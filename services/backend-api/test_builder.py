@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from kubernetes import client as k8s_client
+from kubernetes.client.exceptions import ApiException
 
 import gitea_client
 from builder import build_and_push
@@ -206,6 +207,73 @@ def test_kaniko_job_failure_raises_runtime_error_with_pod_logs():
         )
 
         with pytest.raises(RuntimeError, match="no such file or directory"):
+            build_and_push("rtwp-anomaly-demo", SOURCE)
+
+
+def test_a_rebuild_deletes_the_stale_job_before_creating_the_new_one():
+    """Job names are deterministic (f"{macro_name}-build"), so rebuilding an
+    existing macro -- expected, supported behavior per main.py's build_macro
+    docstring -- must delete any prior Job of that name first, or
+    create_namespaced_job hits a real Kubernetes 409 Conflict.
+    """
+    call_order = []
+
+    def track_delete(*args, **kwargs):
+        call_order.append(("delete_namespaced_job", kwargs.get("name")))
+
+    def track_create(*args, **kwargs):
+        call_order.append(("create_namespaced_job", kwargs["body"].metadata.name))
+        return MagicMock()
+
+    with (
+        patch("builder.gitea_client.ensure_repo", return_value="http://gitea:3000/admin/rtwp-anomaly-demo"),
+        patch("builder.gitea_client.push_artifacts"),
+        patch("builder.k8s_client.BatchV1Api") as mock_batch_api,
+    ):
+        mock_batch_api.return_value.delete_namespaced_job.side_effect = track_delete
+        mock_batch_api.return_value.create_namespaced_job.side_effect = track_create
+        mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
+
+        build_and_push("rtwp-anomaly-demo", SOURCE)
+
+    assert call_order == [
+        ("delete_namespaced_job", "rtwp-anomaly-demo-build"),
+        ("create_namespaced_job", "rtwp-anomaly-demo-build"),
+    ]
+
+
+def test_deleting_a_nonexistent_job_on_first_ever_build_does_not_raise():
+    """The first build of a macro has no prior Job to delete --
+    delete_namespaced_job raising a 404-style ApiException must be treated
+    as success, not an error, and the build must still proceed normally.
+    """
+    with (
+        patch("builder.gitea_client.ensure_repo", return_value="http://gitea:3000/admin/rtwp-anomaly-demo"),
+        patch("builder.gitea_client.push_artifacts"),
+        patch("builder.k8s_client.BatchV1Api") as mock_batch_api,
+    ):
+        mock_batch_api.return_value.delete_namespaced_job.side_effect = ApiException(status=404)
+        mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
+
+        tag = build_and_push("rtwp-anomaly-demo", SOURCE)
+
+    mock_batch_api.return_value.create_namespaced_job.assert_called_once()
+    assert tag == "registry:5000/rtwp-anomaly-demo:generated"
+
+
+def test_unexpected_api_exception_on_job_creation_becomes_a_runtime_error():
+    """A 409 (or any other unexpected ApiException) from create_namespaced_job
+    -- e.g. a genuine concurrent build racing the delete -- must surface as a
+    clear RuntimeError, not leak a raw kubernetes ApiException to callers.
+    """
+    with (
+        patch("builder.gitea_client.ensure_repo", return_value="http://gitea:3000/admin/rtwp-anomaly-demo"),
+        patch("builder.gitea_client.push_artifacts"),
+        patch("builder.k8s_client.BatchV1Api") as mock_batch_api,
+    ):
+        mock_batch_api.return_value.create_namespaced_job.side_effect = ApiException(status=409, reason="Conflict")
+
+        with pytest.raises(RuntimeError, match="Kaniko Job creation failed"):
             build_and_push("rtwp-anomaly-demo", SOURCE)
 
 

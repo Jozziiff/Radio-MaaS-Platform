@@ -48,6 +48,7 @@ New flow, in order:
 from pathlib import Path
 
 from kubernetes import client as k8s_client
+from kubernetes.client.exceptions import ApiException
 
 import gitea_client
 from artifact_generator import generate_artifacts
@@ -79,9 +80,15 @@ def build_and_push(macro_name: str, source_code: str) -> str:
 
     Raises:
         RuntimeError: if the Gitea push fails (repo creation or artifact
-            push), or if the Kaniko Job fails -- the message names which
-            step failed and includes real diagnostic detail (the Gitea
-            error text, or the failed Kaniko pod's own logs).
+            push), if the Kaniko Job fails (the failed pod's own logs),
+            or if the Kubernetes API itself fails at any step --
+            deleting a stale prior-build Job of the same deterministic
+            name (a rebuild of an existing macro is expected, supported
+            behavior -- see main.py's build_macro docstring) or creating
+            the new Job (e.g. RBAC denial, a 409 from a genuine
+            concurrent build). Every case names the failing step and
+            includes real diagnostic detail rather than leaking a raw
+            kubernetes.client.exceptions.ApiException to callers.
     """
     analysis = analyze(source_code)
     artifacts = generate_artifacts(analysis)
@@ -100,11 +107,52 @@ def build_and_push(macro_name: str, source_code: str) -> str:
 
     job = _build_kaniko_job_manifest(macro_name, image_tag)
     batch_api = k8s_client.BatchV1Api()
-    batch_api.create_namespaced_job(namespace=JOB_NAMESPACE, body=job)
+
+    _delete_stale_kaniko_job(batch_api, job.metadata.name)
+
+    try:
+        batch_api.create_namespaced_job(namespace=JOB_NAMESPACE, body=job)
+    except ApiException as exc:
+        raise RuntimeError(
+            f"Kaniko Job creation failed for '{job.metadata.name}': "
+            f"Kubernetes API returned {exc.status} {exc.reason}"
+        ) from exc
 
     _wait_for_kaniko_job(job.metadata.name)
 
     return image_tag
+
+
+def _delete_stale_kaniko_job(batch_api: k8s_client.BatchV1Api, job_name: str) -> None:
+    """Delete a prior build Job of this name, if any, before creating a new one.
+
+    Build Job names are deterministic (see _build_kaniko_job_manifest's
+    docstring), so rebuilding an existing macro -- expected, supported
+    behavior per main.py's build_macro docstring -- would otherwise hit a
+    Kubernetes 409 Conflict on create_namespaced_job the second time a
+    given macro is built. A 404 here just means this is the macro's first
+    build ever (nothing to delete) and is not an error; any other
+    ApiException (RBAC denial, namespace not found, a transient API
+    server error) is surfaced as a RuntimeError rather than left as a
+    raw Kubernetes client exception.
+
+    True concurrent-build mutual exclusion (a distributed lock) is out of
+    scope -- this only guards the ordinary sequential-rebuild case. A
+    genuine concurrent build racing this delete can still surface a 409
+    from create_namespaced_job itself, which build_and_push separately
+    converts to a RuntimeError.
+    """
+    try:
+        batch_api.delete_namespaced_job(
+            name=job_name, namespace=JOB_NAMESPACE, propagation_policy="Foreground"
+        )
+    except ApiException as exc:
+        if exc.status == 404:
+            return
+        raise RuntimeError(
+            f"Failed to delete stale Kaniko Job '{job_name}' before rebuild: "
+            f"Kubernetes API returned {exc.status} {exc.reason}"
+        ) from exc
 
 
 def _build_kaniko_job_manifest(macro_name: str, image_tag: str) -> k8s_client.V1Job:

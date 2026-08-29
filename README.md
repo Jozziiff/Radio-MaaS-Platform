@@ -110,21 +110,45 @@ version of it.
 
 ### 1. Create the cluster
 
-For a **brand-new** cluster, pass `infra/registries.yaml` at creation time
-so containerd trusts the in-cluster registry (`registry:5000`,
-`infra/registry.yaml`) as insecure/plain-HTTP from the start — required
-before any Kaniko build or macro execution can push/pull images:
+For a **brand-new** cluster, pass two flags together:
 
 ```bash
-k3d cluster create radio-maas --registry-config infra/registries.yaml
+k3d cluster create radio-maas \
+  --registry-config infra/registries.yaml \
+  --host-alias 10.43.99.99:registry
 ```
 
-If you already have an **existing** cluster from before this file
-existed, see "Applying `infra/registries.yaml` to an existing cluster"
-below instead — **this does not require deleting or recreating the
-cluster**, unlike this repo's other "when in doubt, delete and recreate"
-precedent for a stranded cluster (see [RUNBOOK.md](docs/RUNBOOK.md)'s
-symptom table).
+- `--registry-config infra/registries.yaml` makes containerd trust the
+  in-cluster registry (`registry:5000`, `infra/registry.yaml`) as
+  insecure/plain-HTTP — required before any push/pull to it can succeed
+  at the TLS-transport level.
+- `--host-alias 10.43.99.99:registry` is separately required for a
+  completely different reason: the k3d **node itself** (where containerd
+  actually runs, doing the real image pull/push) cannot resolve
+  Kubernetes Service DNS names at all — only CoreDNS can do that, and
+  CoreDNS is only reachable from inside pods, never from the node's own
+  network namespace. Confirmed directly against this project's real
+  cluster: without this flag, every Kaniko push and every execution Job's
+  image pull fails with `dial tcp: lookup registry: no such host`, even
+  though `infra/registries.yaml`'s trust config is perfectly correct.
+  `10.43.99.99` is `infra/registry.yaml`'s **pinned** ClusterIP (see that
+  file's own comment for why it's pinned rather than left to Kubernetes'
+  dynamic allocation) — the two must always match.
+  **This flag only takes effect at cluster-creation time** — unlike
+  `infra/registries.yaml`'s trust config, it cannot be applied to an
+  already-running cluster (confirmed: Docker's own `ExtraHosts` on the
+  node container is set once, at container creation, with no supported
+  way to add it after the fact — `k3d cluster edit`/`k3d node edit` don't
+  support it either). If you have an existing cluster without this flag,
+  see "Applying registry DNS + trust config to an existing cluster"
+  below.
+
+If you already have an **existing** cluster without `infra/registries.yaml`
+applied yet, see "Applying `infra/registries.yaml` to an existing cluster"
+below instead for that half — **that part does not require deleting or
+recreating the cluster**, unlike the `--host-alias` DNS fix above (see
+[RUNBOOK.md](docs/RUNBOOK.md)'s symptom table for both failure modes and
+which fix each one needs).
 
 ### 2. Bootstrap ArgoCD, then let it take over `infra/`
 
@@ -249,9 +273,21 @@ here only to keep it next to the other one-time Vault-seeding steps.)
 
 ### 4d. Applying `infra/registries.yaml` to an existing cluster
 
-If your cluster was created before `infra/registries.yaml` existed (or
-you skipped `--registry-config` in step 1), containerd doesn't yet trust
-`registry:5000` as insecure — apply it directly to the running node.
+Two *separate* problems can prevent Kaniko/execution Jobs from reaching
+the registry — don't conflate them, they need different fixes:
+
+1. **containerd doesn't trust `registry:5000` as insecure HTTP** (missing
+   `infra/registries.yaml` trust config) — symptom: an `x509`/TLS error,
+   or `http: server gave HTTP response to HTTPS client`. Fixed below,
+   **without** deleting/recreating the cluster.
+2. **The node can't resolve the hostname `registry` at all** (missing
+   `--host-alias`) — symptom: `dial tcp: lookup registry: no such host`.
+   This one genuinely **does require recreating the cluster** — see the
+   callout at the end of this section, don't skip it.
+
+**Fixing problem 1** (containerd trust), if your cluster was created
+before `infra/registries.yaml` existed, or you skipped `--registry-config`
+in step 1 — apply it directly to the running node.
 **Verified against this project's real cluster: this only needs a soft
 restart, not a full `k3d cluster delete`/`create`:**
 
@@ -280,6 +316,34 @@ one-time step per cluster — the config lives on the node's filesystem,
 not in an `emptyDir` volume, so (unlike the Vault/MinIO/registry secrets
 above) it survives ordinary pod restarts; it's only lost if the cluster
 itself is deleted and recreated.
+
+**Fixing problem 2** (node DNS resolution) — **this one requires
+recreating the cluster**, confirmed by direct investigation: `--host-alias`
+is a k3d flag that writes a static `/etc/hosts` entry into the node
+container at creation time, and it survives ordinary `k3d cluster
+stop`/`start` restarts (k3d re-injects it every restart from its own
+tracked cluster config) — but there is no supported way to add it to an
+already-running cluster after the fact. A manual `docker exec ... >>
+/etc/hosts` edit on a running node *looks* like it works immediately, but
+does **not** survive even a soft restart (Docker regenerates `/etc/hosts`
+fresh on every container start unless `--host-alias`/`--add-host` was set
+at creation) — confirmed by testing exactly that sequence and watching the
+manual edit disappear. If your existing cluster doesn't have this fix:
+
+```bash
+k3d cluster delete radio-maas
+k3d cluster create radio-maas \
+  --registry-config infra/registries.yaml \
+  --host-alias 10.43.99.99:registry
+```
+
+This deletes all cluster data (same "when in doubt, delete and recreate"
+tradeoff documented in [RUNBOOK.md](docs/RUNBOOK.md)'s symptom table for
+a stranded cluster) — you'll need to redo the ArgoCD bootstrap (step 2)
+and every one-time seeding step in this section again from scratch. There
+is no lighter-weight fix for this specific problem; it's a real,
+structural limitation of how Docker/k3d assign node-level `/etc/hosts`
+entries, not a workaround-able configuration gap.
 
 ### 5. Set up Gitea — manual, can't be scripted
 

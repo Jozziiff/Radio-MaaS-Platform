@@ -56,12 +56,27 @@ spec:
 # same pattern as every other infra/*.yaml Service. Combined with
 # htpasswd auth above: network isolation as defense-in-depth on top of
 # real credentials, not instead of them.
+#
+# clusterIP is PINNED (not left to Kubernetes' dynamic allocation), unlike
+# every other Service in this project. Reason: the k3d node's own
+# containerd (which does the actual image pull/push) cannot resolve
+# Kubernetes Service DNS names at all -- only CoreDNS can, and only pods
+# reach CoreDNS. containerd needs a node-level /etc/hosts entry mapping
+# "registry" to a real IP (via k3d's `--host-alias 10.43.99.99:registry`
+# at cluster-creation time, see README.md's "Create the cluster" step and
+# docs/decisions/008-kaniko-instead-of-docker-socket.md). That flag needs
+# a fixed IP to point at *before* this Service exists (chicken-and-egg
+# with dynamic allocation), so this Service pins its own ClusterIP to
+# match -- 10.43.99.99 is in this cluster's default Service CIDR
+# (10.43.0.0/16) and was confirmed unused by any other Service at the
+# time this was set up.
 apiVersion: v1
 kind: Service
 metadata:
   name: registry
 spec:
   type: ClusterIP
+  clusterIP: 10.43.99.99
   selector:
     app: registry
   ports:

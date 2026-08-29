@@ -261,6 +261,14 @@ k3d cluster stop radio-maas
 k3d cluster start radio-maas
 ```
 
+> **Windows/Git Bash:** if `docker cp` fails with something like
+> `GetFileAttributesEx C:\c: The system cannot find the file specified`,
+> Docker's Windows CLI didn't accept the Git-Bash-style `/c/Users/...`
+> path for the local source argument. Use the Windows-native form instead,
+> e.g. `docker cp "C:\Users\...\infra\registries.yaml" k3d-radio-maas-server-0:/etc/rancher/k3s/registries.yaml`
+> (only the *local* source path needs this — the container-side
+> destination path stays as shown above).
+
 Confirm containerd picked it up:
 
 ```bash

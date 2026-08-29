@@ -9,9 +9,10 @@
 # itself (either at `k3d cluster create --registry-config
 # infra/registries.yaml`, or applied to an already-running cluster by
 # placing this file's content at /etc/rancher/k3s/registries.yaml inside
-# each node container and restarting the cluster -- verified NOT to
-# require a full delete/recreate, see docs/decisions/008-kaniko-instead-of-docker-socket.md and
-# docs/RUNBOOK.md's recovery steps).
+# each node container and restarting the cluster -- verified live against
+# this project's own cluster NOT to require a full delete/recreate, see
+# README.md's "Applying infra/registries.yaml to an existing cluster"
+# step and docs/RUNBOOK.md's recovery steps).
 mirrors:
   "registry:5000":
     endpoint:

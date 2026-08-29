@@ -64,13 +64,6 @@ def get_minio_credentials() -> tuple[str, str]:
     return access_key, secret_key
 
 
-def get_registry_credentials() -> tuple[str, str]:
-    """Read container registry credentials from secret/registry's `username`/`password` fields."""
-    username = _read_secret("registry", "username")
-    password = _read_secret("registry", "password")
-    return username, password
-
-
 def get_gitea_token() -> str:
     """Read the Gitea API token from secret/gitea's `token` field."""
     return _read_secret("gitea", "token")

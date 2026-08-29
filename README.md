@@ -13,7 +13,7 @@
   <img alt="Kubernetes" src="https://img.shields.io/badge/kubernetes-k3d-326CE5?logo=kubernetes&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/api-FastAPI-009688?logo=fastapi&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/frontend-React%20%2B%20Vite-61DAFB?logo=react&logoColor=white">
-  <img alt="Milestone" src="https://img.shields.io/badge/milestone-M6%20in%20progress-yellow">
+  <img alt="Milestone" src="https://img.shields.io/badge/milestone-M7%20production%20hardening-yellow">
   <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue">
 </p>
 
@@ -498,10 +498,15 @@ Frontend changes are currently verified manually against the running app.
 - **Single hardcoded admin user**, no user store, no roles/permissions, no
   refresh tokens, no login rate limiting. See
   [M4-jwt-auth.md](docs/decisions/M4-jwt-auth.md).
-- **No observability** (Prometheus/Grafana) yet — blocked on M6's frontend
-  work finishing first, per the project's own milestone sequencing.
-- **No real OSS/BSS integration** (M7) — blocked on a supervisor meeting
-  that hasn't happened yet; not started, not guessed at.
+- **No observability** (Prometheus/Grafana) — out of scope for the
+  current production-hardening phase (see below), not just M6 anymore.
+- **No OSS/BSS integration, and none planned.** The originally-scoped M7
+  (NetCracker/NFMS) was cancelled outright at the project's interfaces
+  meeting with the supervisor — another team now owns that work. This
+  project's current M7 is production hardening instead: persistent
+  storage, real network reachability, and a deployable/documented
+  handoff. See
+  [007-scope-pivot-production-hardening.md](docs/decisions/007-scope-pivot-production-hardening.md).
 
 ## License
 

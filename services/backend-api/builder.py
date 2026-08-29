@@ -58,7 +58,6 @@ from vault_client import get_gitea_token
 JOB_NAMESPACE = "default"
 REGISTRY_HOST = "registry:5000"
 GITEA_HOST = "gitea:3000"
-GITEA_OWNER = "admin"
 KANIKO_IMAGE = "gcr.io/kaniko-project/executor:latest"
 REGISTRY_DOCKER_CONFIG_SECRET = "registry-push-secret"
 
@@ -169,7 +168,7 @@ def _build_kaniko_job_manifest(macro_name: str, image_tag: str) -> k8s_client.V1
     rather than implicit in this manifest-building function.
     """
     gitea_token = get_gitea_token()
-    context = f"git://{GITEA_HOST}/{GITEA_OWNER}/{macro_name}.git#refs/heads/main"
+    context = f"git://{GITEA_HOST}/{gitea_client.GITEA_USERNAME}/{macro_name}.git#refs/heads/main"
 
     container = k8s_client.V1Container(
         name="kaniko",

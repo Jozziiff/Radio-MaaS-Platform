@@ -26,7 +26,8 @@ def _failed_job():
 
 
 @pytest.fixture(autouse=True)
-def vault_credentials_mocked():
+def vault_credentials_mocked(monkeypatch):
+    monkeypatch.setattr(gitea_client, "GITEA_USERNAME", "admin")
     with patch("builder.get_gitea_token", return_value="test-gitea-token"):
         yield
 

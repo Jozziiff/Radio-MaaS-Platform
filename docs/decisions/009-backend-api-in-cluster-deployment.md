@@ -210,7 +210,11 @@ persistence gap named below).
   Consistent with every other manifest in `infra/` today (none of them
   have probes or resource requests either) -- a known gap worth
   addressing project-wide in a later pass, not singled out for just this
-  one Deployment.
+  one Deployment. **Closed for `backend-api` itself as a follow-up --
+  see "Follow-up: probes and resource limits" below.** The other four
+  manifests remain unchanged; this was deliberately scoped to the one
+  service the whole team's daily use depends on directly, not a
+  project-wide pass.
 
 ## Verification
 
@@ -280,3 +284,67 @@ macro image (not just backend-api's own image) has to be rebuilt from
 source before the platform is usable again, which is the same class of
 "unacceptable for daily use" problem 007 already calls out for the
 other three services.
+
+## Follow-up: probes and resource limits
+
+Closes the `livenessProbe`/`readinessProbe`/`resources` deferral logged
+above. Done for `backend-api` specifically, ahead of the other four
+`infra/*.yaml` manifests, because it's the one service the whole team's
+daily use depends on directly (every macro build and run goes through
+it) and it has a genuinely slow, network-dependent startup path: three
+sequential Vault round-trips in `lifespan()` before the app serves
+anything at all. Without a readiness probe the Service could route
+traffic to a pod still mid-startup; without a liveness probe a wedged
+process would never get restarted.
+
+**`GET /health`** (`services/backend-api/main.py`) is a new,
+unauthenticated endpoint added as the probe target, rather than reusing
+`GET /docs` (which had worked fine for manual verification throughout
+this doc's own testing, but is Swagger's UI, not a real health
+contract). It does nothing but return `{"status": "ok"}` -- deliberately
+does *not* re-check Vault/MinIO/Gitea on every call. Since `lifespan()`
+is an `async with`-style context wrapping the whole app lifetime,
+FastAPI serves no route at all, `/health` included, until `lifespan()`'s
+`yield` is reached -- so a `200` from `/health` already proves the
+startup Vault round-trips succeeded once, with no need to repeat them on
+a timer. Repeating them would also turn Vault/MinIO/Gitea's own
+availability into backend-api's restart trigger, which is a different
+(and worse) failure mode than what a liveness/readiness check is for.
+
+`infra/backend-api.yaml`'s Deployment:
+
+- `readinessProbe`: `GET /health`, `initialDelaySeconds: 5`,
+  `periodSeconds: 5`, `failureThreshold: 3`. Gates the Service (further
+  down in the same manifest) from routing to a pod that hasn't finished
+  startup.
+- `livenessProbe`: same endpoint, `initialDelaySeconds: 15` (later than
+  the readiness probe's, so normal startup never races it into a
+  restart), `periodSeconds: 10`, `failureThreshold: 3` -- about 30
+  seconds of consecutive failures, not one slow response, before
+  Kubernetes restarts the container.
+- `resources`: `requests: cpu: 100m, memory: 128Mi`,
+  `limits: cpu: 500m, memory: 256Mi`. Modest defaults sized for a small,
+  single-replica FastAPI process serving one internal team's traffic --
+  not derived from real usage metrics, since none exist yet (see 007's
+  "Observability stays out of scope for now"). Tunable once real numbers
+  are available.
+
+**Verification:**
+
+1. Pushed via the normal GitOps flow (`git push`, no manual `kubectl
+   apply`); `kubectl get application -n argocd` showed `radio-maas-infra`
+   `Synced`/`Healthy` with the updated Deployment picked up automatically.
+2. `kubectl get pods -l app=backend-api` -- `1/1 Running`, reached
+   `Ready` normally with the new probes in place, not stuck in a
+   probe-failure restart loop.
+3. Killed the `uvicorn` process inside the running container directly
+   (`kubectl exec` + `kill`) to simulate a wedge, rather than just
+   trusting the YAML. `kubectl get pods -w` showed the container restart
+   (`RESTARTS` incremented), and `kubectl describe pod` showed a
+   `Liveness probe failed` event followed by the container being killed
+   and recreated -- proof the mechanism actually fires, not just that
+   it's configured.
+
+The other four `infra/*.yaml` manifests still have no probes or resource
+limits -- this remains a deliberately scoped, single-service fix, not a
+project-wide pass.

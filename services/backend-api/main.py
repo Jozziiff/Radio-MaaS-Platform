@@ -268,6 +268,23 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+def health() -> dict[str, str]:
+    """Liveness/readiness probe target (M7: infra/backend-api.yaml).
+
+    Deliberately does nothing but confirm the process is up and past
+    lifespan()'s startup -- FastAPI does not serve any route, including
+    this one, until lifespan()'s `yield` is reached, so a 200 here already
+    proves the Vault round-trips succeeded once. It does not re-check
+    Vault/MinIO/Gitea on every call: a probe firing every few seconds
+    hitting external dependencies each time would turn their availability
+    into backend-api's own restart trigger, which is not what a
+    liveness/readiness check is for. No auth required, matching
+    Kubernetes' kubelet, which cannot carry a JWT.
+    """
+    return {"status": "ok"}
+
+
 @app.exception_handler(MacroSyntaxError)
 async def handle_macro_syntax_error(request: Request, exc: MacroSyntaxError) -> JSONResponse:
     """Turn an invalid macro script into a 422 a frontend can act on.

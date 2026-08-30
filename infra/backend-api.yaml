@@ -114,6 +114,48 @@ spec:
           volumeMounts:
             - name: registry-db
               mountPath: /app/data
+          # readinessProbe: gates whether the Service (below) routes
+          # traffic to this pod. lifespan() does three sequential Vault
+          # round-trips before FastAPI serves anything at all (including
+          # /health itself), so a fresh/restarted pod that isn't ready
+          # yet just fails this probe rather than getting real requests
+          # routed to it and hanging until startup completes.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          # livenessProbe: restarts the container if it stops responding
+          # after having started successfully (a wedged process, not a
+          # slow-starting one). initialDelaySeconds is longer than the
+          # readiness probe's so normal startup never races it into a
+          # restart; periodSeconds/failureThreshold give a wedge ~30s of
+          # failed checks (not one slow response) before Kubernetes acts.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          # Modest defaults for a small single-replica FastAPI service
+          # with low internal traffic (this team's own macro
+          # builds/runs, not public load). requests are low enough the
+          # scheduler never struggles to place this pod; limits are
+          # generous enough that normal build/poll traffic doesn't risk
+          # an OOM-kill. Tunable once real usage patterns are observed
+          # (no production metrics exist yet to size this more
+          # precisely -- see docs/decisions/007's "Observability stays
+          # out of scope for now").
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
       volumes:
         - name: registry-db
           persistentVolumeClaim:

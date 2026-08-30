@@ -211,6 +211,14 @@ def vault_secrets_mocked():
         yield
 
 
+def test_health_returns_200_without_auth():
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def test_list_macros_is_empty_before_anything_is_built():
     with TestClient(app) as client:
         from auth import create_token

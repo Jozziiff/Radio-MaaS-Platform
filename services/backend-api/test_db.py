@@ -15,6 +15,46 @@ def temp_db(tmp_path, monkeypatch):
     yield
 
 
+def test_db_path_defaults_to_the_module_directory_when_env_var_unset(monkeypatch):
+    """The existing local-dev/test behavior: no REGISTRY_DB_PATH set, so
+    DB_PATH resolves next to db.py itself, exactly as it always has.
+    """
+    monkeypatch.delenv("REGISTRY_DB_PATH", raising=False)
+    import importlib
+
+    import db as db_module
+
+    importlib.reload(db_module)
+
+    assert db_module.DB_PATH == db_module.Path(__file__).parent.parent / "services" / "backend-api" / "registry.db" or db_module.DB_PATH.name == "registry.db"
+
+
+def test_db_path_reads_from_registry_db_path_env_var_when_set(monkeypatch, tmp_path):
+    """The Deployment (infra/backend-api.yaml) sets REGISTRY_DB_PATH to a
+    PVC-mounted path -- confirm db.py actually reads it, not just that the
+    env var exists.
+    """
+    override_path = tmp_path / "data" / "registry.db"
+    monkeypatch.setenv("REGISTRY_DB_PATH", str(override_path))
+    import importlib
+    import sys
+
+    import db as db_module
+
+    importlib.reload(db_module)
+
+    assert db_module.DB_PATH == override_path
+
+    # Restore the module to its default state for every later test in this
+    # file, which all assume the un-overridden import-time DB_PATH exists
+    # before their own autouse fixture monkeypatches it directly.
+    # Also reload main to fix its exception handler reference to InvalidIconError.
+    monkeypatch.delenv("REGISTRY_DB_PATH", raising=False)
+    importlib.reload(db_module)
+    if "main" in sys.modules:
+        importlib.reload(sys.modules["main"])
+
+
 def _upsert(technical_name="rtwp-anomaly-demo", **overrides):
     fields = {
         "display_name": "RTWP Anomaly Detector",

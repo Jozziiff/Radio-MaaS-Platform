@@ -5,7 +5,10 @@ restart -- exactly the bug this fixes (GET /macros returning empty after
 any restart, even though images built in a prior process were still sitting
 in the cluster). SQLite is a single file (registry.db, gitignored -- this is
 local runtime state, not something to commit), created on first use via
-init_db(), no separate database service to stand up.
+init_db(), no separate database service to stand up. In-cluster, this path is
+overridden via REGISTRY_DB_PATH to a PersistentVolumeClaim-backed directory --
+see infra/backend-api.yaml -- so it survives pod restarts; the module-relative
+default above stays exactly as-is for local dev and tests.
 
 M6 (continued): also stores execution history (the `executions` table),
 replacing main.py's in-memory JOB_TO_MACRO dict -- same restart-survival
@@ -20,10 +23,11 @@ SQLite's own file locking. Worth revisiting if this ever needs to run as
 more than one backend-api process against the same file.
 """
 
+import os
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "registry.db"
+DB_PATH = Path(os.environ.get("REGISTRY_DB_PATH", str(Path(__file__).parent / "registry.db")))
 
 # Fixed set of lucide-react icon names a macro can be tagged with. Validated
 # against this list rather than accepting any string, so the frontend can

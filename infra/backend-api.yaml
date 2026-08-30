@@ -14,6 +14,16 @@
 # list/watch/delete on Jobs, get/list/watch on Pods and the pods/log
 # subresource (reading a Job's failed pod's logs needs this subresource
 # specifically -- a bare `pods` grant does not implicitly cover it).
+# `jobs/status` is listed as its own resource too: builder.py/main.py poll
+# a Job via `read_namespaced_job_status`, which the Kubernetes API server
+# treats as a request against the `jobs/status` subresource, not `jobs`
+# itself -- a bare `jobs` grant does not implicitly cover it either, the
+# same subresource-is-separate pattern as pods/log above. Discovered live
+# during Task 5's own end-to-end verification (a real
+# `jobs.batch "..." is forbidden ... cannot get resource "jobs/status"`
+# 403 from a real Kaniko build attempt, not a hypothetical) and fixed
+# here rather than left for a future task, since it blocked every
+# remaining verification step downstream of a macro build.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -25,7 +35,7 @@ metadata:
   name: backend-api-job-manager
 rules:
   - apiGroups: ["batch"]
-    resources: ["jobs"]
+    resources: ["jobs", "jobs/status"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["pods", "pods/log"]

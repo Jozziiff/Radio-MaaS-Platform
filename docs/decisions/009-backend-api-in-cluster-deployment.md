@@ -333,18 +333,65 @@ availability into backend-api's restart trigger, which is a different
 
 1. Pushed via the normal GitOps flow (`git push`, no manual `kubectl
    apply`); `kubectl get application -n argocd` showed `radio-maas-infra`
-   `Synced`/`Healthy` with the updated Deployment picked up automatically.
+   `Synced`/`Healthy` with the updated Deployment picked up automatically
+   (confirmed at the exact new revision).
 2. `kubectl get pods -l app=backend-api` -- `1/1 Running`, reached
    `Ready` normally with the new probes in place, not stuck in a
-   probe-failure restart loop.
-3. Killed the `uvicorn` process inside the running container directly
-   (`kubectl exec` + `kill`) to simulate a wedge, rather than just
-   trusting the YAML. `kubectl get pods -w` showed the container restart
-   (`RESTARTS` incremented), and `kubectl describe pod` showed a
-   `Liveness probe failed` event followed by the container being killed
-   and recreated -- proof the mechanism actually fires, not just that
-   it's configured.
+   probe-failure restart loop. Pod logs showed kubelet's own probe
+   traffic hitting `GET /health` every few seconds, confirming the
+   probes are actually live, not just present in the YAML.
+3. Proving the restart mechanism took two attempts. First tried
+   `kubectl exec <pod> -- sh -c "kill -STOP 1"` / `kill -9 1` to wedge or
+   kill the `uvicorn` process from inside the container -- neither
+   landed (`/proc/1/status` kept reporting `State: S (sleeping)`,
+   unchanged, and the restart count stayed `0`); `kubectl exec`'s signal
+   delivery to PID 1 appears to be blocked in this setup, root cause not
+   further chased. Fell back to signaling the process directly at the
+   node/OS level instead: `crictl inspect <containerID>` on the k3d node
+   (via `docker exec k3d-radio-maas-server-0 crictl inspect ...`) gave
+   the container's *host*-level PID, then `docker exec
+   k3d-radio-maas-server-0 kill -9 <host pid>` killed it for real. This
+   confirmed `RESTARTS` incremented to `1` within seconds and the pod
+   returned to `1/1 Running`/`Ready` on its own, `registry.db` on the PVC
+   intact -- proof Kubernetes' restart-on-crash safety net works for this
+   Deployment. **Caveat, stated plainly:** this exercises container
+   restart-on-death, the same recovery path a liveness-probe timeout
+   uses, but does not specifically exercise the liveness probe's own
+   `failureThreshold`-based HTTP-failure detection (a wedged-but-still-
+   running process failing 3 consecutive checks) -- that specific path
+   was attempted but not successfully reproduced, given the signal-
+   delivery blocker above.
 
 The other four `infra/*.yaml` manifests still have no probes or resource
 limits -- this remains a deliberately scoped, single-service fix, not a
 project-wide pass.
+
+### The registry-DNS-loss recovery recurred a second time
+
+Verifying this task's own GitOps push surfaced the exact same failure
+this doc already describes above (a Docker Desktop restart wiping the
+k3d node's `--host-alias registry` entry) -- this time triggered by an
+unrelated PC crash mid-session, not a deliberate settings change. Same
+symptom (`dial tcp: lookup registry: no such host`), same root cause
+(Docker regenerates node `/etc/hosts` on every container start unless
+`--host-alias` was set at cluster-*creation* time), same fix (a full
+`k3d cluster delete`/`create` with the flag, then a complete infra
+re-bootstrap: ArgoCD, MinIO buckets, Vault secrets, the registry
+credential trio, a brand-new Gitea admin account + token since the old
+one didn't survive either, and rebuilding/repushing `backend-api:latest`
+from scratch).
+
+This is now a **repeat**, not a one-off: this environment's cluster
+state can be wiped by something as ordinary as the host machine
+crashing or restarting Docker Desktop, not just a deliberate config
+change. It's the same underlying problem this doc's own "A real gap
+this surfaced" section above already named for the registry's image
+storage specifically -- but the recurrence this time makes the case
+project-wide: MinIO, Vault, Gitea, and the registry are *all* one crash
+away from a full manual re-seed, and that re-seed is entirely manual,
+multi-step, and currently undocumented as a single runbook (its steps
+are scattered across this doc, README.md, and docs/RUNBOOK.md).
+Reinforces, with a second real data point, that 007's persistence
+priority item is the right thing to tackle next -- see
+[010-persistence-phase-checkpoint.md](010-persistence-phase-checkpoint.md)
+for where that work stands.

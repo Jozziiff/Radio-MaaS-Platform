@@ -1,6 +1,8 @@
 """Tests for the macro registry database (M6). See db.py for module purpose."""
 
 import os
+import subprocess
+import sys
 import pytest
 from pathlib import Path
 
@@ -18,36 +20,46 @@ def temp_db(tmp_path, monkeypatch):
 
 
 def test_db_path_defaults_to_the_module_directory_when_env_var_unset(monkeypatch):
-    """The existing local-dev/test behavior: no REGISTRY_DB_PATH set, so
-    DB_PATH resolves next to db.py itself, exactly as it always has.
-    This tests the logic that db.py's module-level DB_PATH initialization uses.
+    """No REGISTRY_DB_PATH set in this test process's environment (the
+    normal case for local dev/CI) -- db.py's module-level code evaluated
+    at import time with no env var set should have set DB_PATH to the
+    module-relative default.
     """
-    monkeypatch.delenv("REGISTRY_DB_PATH", raising=False)
+    # db.py was imported at module load time without REGISTRY_DB_PATH set.
+    # Verify that its module-level initialization set DB_PATH to the default
+    # by checking that it contains the expected path components.
+    import importlib
 
-    # Test the exact expression db.py uses: Path(os.environ.get("REGISTRY_DB_PATH", ...))
-    # When the env var is unset, it should fall back to the default path.
-    default_path = Path(os.environ.get("REGISTRY_DB_PATH", str(Path(__file__).parent.parent / "services" / "backend-api" / "registry.db")))
+    # Reload db in a subprocess to get a fresh import without the fixture's monkeypatch
+    result = subprocess.run(
+        [sys.executable, "-c", "import db; print(db.DB_PATH)"],
+        env={k: v for k, v in os.environ.items() if k != "REGISTRY_DB_PATH"},
+        cwd=Path(__file__).parent,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    # Should be the module-relative path (next to db.py)
+    assert result.stdout.strip() == str(Path(__file__).parent / "registry.db")
 
-    # Verify the result is a valid Path ending in registry.db
-    assert default_path.name == "registry.db"
-    assert "registry.db" in str(default_path)
 
-
-def test_db_path_reads_from_registry_db_path_env_var_when_set(monkeypatch, tmp_path):
+def test_db_path_reads_from_registry_db_path_env_var_when_set(tmp_path):
     """The Deployment (infra/backend-api.yaml) sets REGISTRY_DB_PATH to a
-    PVC-mounted path -- confirm the path-resolution logic actually reads it.
-    This tests that db.py's path-resolution logic correctly uses the env var
-    when it's set.
+    PVC-mounted path -- confirm db.py's own DB_PATH actually reads it at
+    import time, in a fresh process (module-level code only runs once per
+    process, so this can't be tested by mutating os.environ after db.py
+    has already been imported in this test process).
     """
     override_path = tmp_path / "data" / "registry.db"
-    monkeypatch.setenv("REGISTRY_DB_PATH", str(override_path))
-
-    # Test the exact expression db.py uses: Path(os.environ.get("REGISTRY_DB_PATH", ...))
-    # When the env var is set, it should use the env var value.
-    resolved_path = Path(os.environ.get("REGISTRY_DB_PATH", str(Path(__file__).parent.parent / "services" / "backend-api" / "registry.db")))
-
-    # Verify it resolved to the override path
-    assert resolved_path == override_path
+    result = subprocess.run(
+        [sys.executable, "-c", "import db; print(db.DB_PATH)"],
+        env={**os.environ, "REGISTRY_DB_PATH": str(override_path)},
+        cwd=Path(__file__).parent,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == str(override_path)
 
 
 def _upsert(technical_name="rtwp-anomaly-demo", **overrides):

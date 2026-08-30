@@ -260,12 +260,15 @@ must be regenerated together from the same password — if you re-seed
 Secrets to match, builds and pulls will fail with a registry `401`. See
 [RUNBOOK.md](RUNBOOK.md)'s symptom table.
 
-### 4c. Seed Kaniko's own Gitea read credential — **required on every fresh cluster**
+### 4c. Seed the Gitea access token in Vault — **required on every fresh cluster**
 
-Separate from the `GITEA_TOKEN` env var `backend-api` itself uses (step 5
-below) — this is a second, distinct Vault-sourced credential specifically
-for the Kaniko build Job's own git clone step, injected into that Job's
-environment rather than `backend-api`'s process environment:
+The Gitea access token generated in step 5 below is one credential with
+two consumers: the Kaniko build Job's own git clone step, and
+`backend-api` itself (`gitea_client.py`, which reads it via
+`vault_client.get_gitea_token()` at startup — see
+[005-gitea-artifact-mirror.md](docs/decisions/005-gitea-artifact-mirror.md)'s
+follow-up section). Both read the same Vault path, `secret/gitea`; there
+is no separate `backend-api`-only copy of this token.
 
 ```bash
 vault kv put secret/gitea token="<the same Gitea access token from step 5>"
@@ -364,21 +367,23 @@ kubectl port-forward svc/gitea 3000:3000 &
    Gitea admin automatically).
 2. In that account's Settings → Applications, generate an access token
    with repo read/write scope.
-3. Export it for the backend to use:
+3. Export the account name, and seed the token into Vault (step 4c above)
+   — `backend-api` reads the token from `secret/gitea`, not from an env
+   var:
 
 ```bash
 export GITEA_URL=http://localhost:3000
 export GITEA_USERNAME=<the account you just created>
-export GITEA_TOKEN=<the token you just generated>
 ```
+
+Then go back and run step 4c's `vault kv put secret/gitea token=...` with
+the token you just generated, if you haven't already.
 
 If you skip this step, macro builds will **fail**: since M7, Kaniko
 builds directly from the macro's Gitea repo, so the Gitea push is a
 required build dependency, not best-effort — a push failure fails the
 whole build request with a `422` (see
 [008-kaniko-instead-of-docker-socket.md](docs/decisions/008-kaniko-instead-of-docker-socket.md)).
-`GITEA_TOKEN` isn't Vault-sourced yet; it's a known, named gap, not an
-oversight.
 
 ### 6. Run the backend
 
@@ -394,6 +399,28 @@ uvicorn main:app --reload
 ```
 
 Swagger UI is now at http://127.0.0.1:8000/docs.
+
+**Deployed alternative:** since M7, `backend-api` can also run as a real
+in-cluster Deployment (`infra/backend-api.yaml`) instead of only via local
+`uvicorn --reload` — useful for testing the same code path colleagues will
+eventually use, and the only way to exercise its PVC-backed
+`registry.db` (see [009-backend-api-in-cluster-deployment.md](docs/decisions/009-backend-api-in-cluster-deployment.md)).
+This doesn't replace local dev — `uvicorn --reload`'s faster iteration
+loop is still the better choice while actively changing code:
+
+```bash
+docker build -t registry:5000/backend-api:latest services/backend-api
+docker push registry:5000/backend-api:latest
+```
+
+`infra/backend-api.yaml` is picked up automatically by the existing
+ArgoCD Application (step 2) — no manual `kubectl apply` needed. Once the
+pod is `Running`, reach it the same way other in-cluster services are
+reached for testing:
+
+```bash
+kubectl port-forward svc/backend-api 8000:8000
+```
 
 ### 7. Run the frontend
 
@@ -613,7 +640,8 @@ radio-maas-platform/
 ├── docs/
 │   ├── brief/            internship brief & living roadmap notes (local only, gitignored)
 │   └── decisions/         one write-up per milestone/decision: what, why, what's left out
-├── infra/                  k3d/Kubernetes manifests (MinIO, Vault, Gitea, ArgoCD Application)
+├── infra/                  k3d/Kubernetes manifests (MinIO, Vault, Gitea,
+│                             the in-cluster registry, backend-api, ArgoCD Application)
 ├── macros/                  sample macro scripts used to develop/test the pipeline
 ├── data/                    local scratch input/output files from early manual runs
 ├── scripts/                 placeholder for future dev/setup helper scripts (currently empty)
@@ -660,9 +688,13 @@ Frontend changes are currently verified manually against the running app.
   Every secret is lost on pod restart and must be re-seeded (see
   [Getting started, step 4](#4-seed-vaults-secrets--required-on-every-fresh-cluster)).
   See [003-vault-secret-management-simplifications.md](docs/decisions/003-vault-secret-management-simplifications.md).
-- **No persistent storage.** MinIO's and Gitea's data both live on
-  `emptyDir` volumes — wiped on every pod restart, not just cluster
-  recreation.
+- **No persistent storage for most services.** MinIO's, Vault's, Gitea's,
+  and the in-cluster registry's data all live on `emptyDir` volumes (or,
+  for the registry, no volume at all) — wiped on every pod restart, not
+  just cluster recreation. `backend-api` is the first exception: since
+  M7, its `registry.db` is PVC-backed (`infra/backend-api.yaml`) and
+  survives pod restarts — see
+  [009-backend-api-in-cluster-deployment.md](docs/decisions/009-backend-api-in-cluster-deployment.md).
 - **No registry-side image cleanup.** `DELETE /macros/{technical_name}`
   removes a macro's database row and Gitea reference, but does not delete
   its built image from the in-cluster registry — that would need a
@@ -678,8 +710,6 @@ Frontend changes are currently verified manually against the running app.
   context and version history, it was never meant to replace the
   infra-level GitOps loop. See
   [005-gitea-artifact-mirror.md](docs/decisions/005-gitea-artifact-mirror.md).
-- **`GITEA_TOKEN` is a plain environment variable, not Vault-sourced** —
-  unlike the JWT signing key and MinIO credentials, which are.
 - **Single hardcoded admin user**, no user store, no roles/permissions, no
   refresh tokens, no login rate limiting. See
   [M4-jwt-auth.md](docs/decisions/M4-jwt-auth.md).

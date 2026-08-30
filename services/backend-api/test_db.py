@@ -3,8 +3,9 @@
 import os
 import subprocess
 import sys
-import pytest
 from pathlib import Path
+
+import pytest
 
 import db
 
@@ -25,12 +26,13 @@ def test_db_path_defaults_to_the_module_directory_when_env_var_unset(monkeypatch
     at import time with no env var set should have set DB_PATH to the
     module-relative default.
     """
-    # db.py was imported at module load time without REGISTRY_DB_PATH set.
-    # Verify that its module-level initialization set DB_PATH to the default
-    # by checking that it contains the expected path components.
-    import importlib
-
-    # Reload db in a subprocess to get a fresh import without the fixture's monkeypatch
+    # db.py's module-level init code only runs once per process, and this
+    # test process already imported db (with the fixture's monkeypatch
+    # applied on top). So spawn a fresh Python process with
+    # REGISTRY_DB_PATH excluded from its environment, import db fresh
+    # there, and check what db.DB_PATH resolved to -- this exercises
+    # db.py's own module-level initialization logic directly, rather than
+    # a re-derived copy of it in the test.
     result = subprocess.run(
         [sys.executable, "-c", "import db; print(db.DB_PATH)"],
         env={k: v for k, v in os.environ.items() if k != "REGISTRY_DB_PATH"},

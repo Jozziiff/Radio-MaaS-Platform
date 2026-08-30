@@ -206,6 +206,11 @@ persistence gap named below).
   question per 007, unaffected by where the API process itself runs.
 - **Versioned/immutable image tags for `backend-api`.** See above --
   `:latest` accepted for now.
+- **`livenessProbe`/`readinessProbe`/`resources` on the Deployment.**
+  Consistent with every other manifest in `infra/` today (none of them
+  have probes or resource requests either) -- a known gap worth
+  addressing project-wide in a later pass, not singled out for just this
+  one Deployment.
 
 ## Verification
 

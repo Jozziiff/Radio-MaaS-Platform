@@ -9,11 +9,16 @@
 # (main.py, builder.py) creates, polls, and deletes Kubernetes Jobs, and
 # reads their pods' logs on failure -- an in-cluster pod only gets an
 # *identity* from its service account token by default, not
-# *authorization*. Scoped to exactly the real API calls this code makes
-# (confirmed directly from main.py/builder.py, not assumed): create/get/
-# list/watch/delete on Jobs, get/list/watch on Pods and the pods/log
-# subresource (reading a Job's failed pod's logs needs this subresource
-# specifically -- a bare `pods` grant does not implicitly cover it).
+# *authorization*. Scoped to the resources and subresources this code
+# touches (confirmed directly from main.py/builder.py, not assumed):
+# Jobs and the jobs/status subresource, Pods and the pods/log subresource
+# (reading a Job's failed pod's logs needs this subresource specifically
+# -- a bare `pods` grant does not implicitly cover it). The verb lists
+# are a safe superset of what's individually exercised -- e.g. list/watch
+# ride along with get as conventional companions rather than being
+# enumerated per exact call site, and nothing here calls delete on
+# jobs/status specifically -- a deliberate simplicity-over-precision
+# choice, not an oversight.
 # `jobs/status` is listed as its own resource too: builder.py/main.py poll
 # a Job via `read_namespaced_job_status`, which the Kubernetes API server
 # treats as a request against the `jobs/status` subresource, not `jobs`

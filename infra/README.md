@@ -29,6 +29,20 @@ Infrastructure configuration for the platform: k3d cluster setup and Kubernetes 
   resolve Kubernetes Service DNS names at all, so this fixed IP + host
   alias is how the node learns to find `registry` by name. See
   008's "The DNS problem" section for the full story.
+- `backend-api.yaml` — `backend-api`'s own in-cluster deployment (M7,
+  see
+  [009-backend-api-in-cluster-deployment.md](../docs/decisions/009-backend-api-in-cluster-deployment.md)):
+  a ServiceAccount, Role, and RoleBinding (RBAC for the Jobs/Pods it
+  creates and polls), a PersistentVolumeClaim, a Deployment, and a
+  Service — six resources in total. **Non-obvious:** the PVC is the
+  first real persistent storage in this project — `registry.db` survives
+  pod restarts, unlike MinIO/Vault/Gitea/the registry above, which are
+  all still `emptyDir` or unpersisted. **Non-obvious:** the Role grants
+  `jobs/status` and `pods/log` as their own explicit resource entries
+  alongside `jobs` and `pods` — Kubernetes subresources aren't implicitly
+  covered by a grant on their parent resource, so a bare `jobs`/`pods`
+  grant is not enough. This gap was found live via a real `403` during
+  this branch's own end-to-end verification; see 009 for the full story.
 - `registries.yaml` — **this is NOT a Kubernetes manifest.** It's a
   k3d/k3s-only containerd config (`mirrors: "registry:5000": endpoint:
   [...]`) that tells every cluster node to trust `registry:5000` as

@@ -119,3 +119,29 @@ that pipeline already produced, after the fact.
    succeeded (200, image built and importable), with only a logged Gitea
    error server-side and `gitea_repo_url` left unchanged from its
    last-known-good value.
+
+## Follow-up: the `GITEA_TOKEN`-from-Vault gap is now closed
+
+The "`GITEA_TOKEN` read directly from the environment, not Vault" item
+above was accurate when written, but is no longer the current state.
+While designing `backend-api`'s in-cluster deployment
+([this milestone's deployment work](007-scope-pivot-production-hardening.md)),
+it turned out `vault_client.get_gitea_token()` — added in M7
+specifically for Kaniko's own git-clone step (see
+[008-kaniko-instead-of-docker-socket.md](008-kaniko-instead-of-docker-socket.md)) —
+reads a token for the exact same Gitea account (`GITEA_USERNAME`) this
+module already pushes to. Confirmed directly against the running Gitea
+instance before relying on it, not assumed: the token stored at
+`secret/gitea` belongs to that same account, `is_admin: true`, generated
+with `write:repository,write:user` scope, with verified real read access
+to that account's repo contents.
+
+So `gitea_client.py`'s `GITEA_TOKEN` is now set once at `main.py`
+startup from that same Vault-sourced value (`gitea_client.GITEA_TOKEN =
+get_gitea_token()` in `lifespan()`, the same pattern `JWT_SECRET` and the
+MinIO credentials already use) instead of being read directly from the
+environment. One Vault-sourced credential, two consumers (Kaniko's Job
+env var, and this module) — not two separately-managed secrets for what
+was always functionally the same token. `GITEA_USERNAME` stays a plain
+env var: it names an account, not a secret, and has no equivalent field
+in `secret/gitea`.

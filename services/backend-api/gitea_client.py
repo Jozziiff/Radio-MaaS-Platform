@@ -19,16 +19,23 @@ fails the whole `POST /macros/{technical_name}/build` request with a 422
 (see main.py's build_macro), instead of being logged and ignored.
 
 Reads GITEA_URL (default "http://gitea:3000", the in-cluster Service name
-from infra/gitea.yaml), GITEA_TOKEN, and GITEA_USERNAME (the account that
-owns the token, needed to address that account's repos via Gitea's REST
-API) from the environment. Unlike JWT_SECRET and the MinIO credentials
-(both read from Vault since M4, see vault_client.py), GITEA_TOKEN is read
-directly from the environment -- a known, deliberate gap, not an
-oversight: moving it into Vault too would be a natural follow-up in M4's
-spirit, but doing so wasn't part of this task's scope. (Kaniko's own,
-separate Gitea read credential *is* Vault-sourced since M7 --
-vault_client.get_gitea_token() -- a new credential for a new consumer,
-not a retrofit of this one.)
+from infra/gitea.yaml) and GITEA_USERNAME (the account that owns the
+token, needed to address that account's repos via Gitea's REST API) from
+the environment. GITEA_TOKEN is set once at startup by main.py's
+lifespan(), from vault_client.get_gitea_token() -- the same Vault-sourced
+credential Kaniko's build Job already uses for its own git clone (see
+docs/decisions/008-kaniko-instead-of-docker-socket.md). Confirmed (not
+assumed) these are genuinely the same usable credential before unifying
+them: the token stored at secret/gitea belongs to the same GITEA_USERNAME
+account, with real, verified read/write access to that account's repos --
+see docs/decisions/005-gitea-artifact-mirror.md's follow-up note. This
+closes M6/M7's previously-named gap (GITEA_TOKEN as a bare env var,
+unlike JWT_SECRET/the MinIO credentials, both Vault-sourced since M4) --
+one Vault-sourced credential, two consumers (Kaniko's Job env var, and
+this module, via main.py's startup), not two separately-managed secrets
+for what's functionally the same token. GITEA_USERNAME stays a plain env
+var: it's an account name, not a secret, and has no equivalent field in
+secret/gitea.
 
 Every function here raises GiteaError on any failure (unreachable Gitea,
 an unexpected HTTP status). Callers that don't want a Gitea outage to
@@ -42,8 +49,13 @@ import os
 import requests
 
 GITEA_URL = os.environ.get("GITEA_URL", "http://gitea:3000")
-GITEA_TOKEN = os.environ.get("GITEA_TOKEN")
 GITEA_USERNAME = os.environ.get("GITEA_USERNAME")
+
+# Set once at startup by main.py's lifespan() from vault_client.get_gitea_token()
+# -- None beforehand so a call made before startup finishes fails loudly
+# instead of silently sending an unauthenticated request (same pattern
+# main.py already uses for MINIO_ACCESS_KEY/MINIO_SECRET_KEY).
+GITEA_TOKEN: str | None = None
 
 _COMMIT_MESSAGE = "sync artifacts from backend-api build"
 

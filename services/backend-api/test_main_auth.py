@@ -26,11 +26,12 @@ def vault_secrets_mocked():
     """Stub out the real Vault calls main.py's lifespan makes at startup.
 
     Without this, `with TestClient(app) as client:` triggers a real
-    network call to Vault (get_jwt_secret/get_minio_credentials) on every
-    test, making this suite depend on a reachable Vault instance -- the
-    same kind of external dependency already avoided elsewhere in this
-    suite (subprocess.run, hvac.Client, the Kubernetes API are all mocked
-    rather than called for real in unit tests).
+    network call to Vault (get_jwt_secret/get_minio_credentials/
+    get_gitea_token) on every test, making this suite depend on a
+    reachable Vault instance -- the same kind of external dependency
+    already avoided elsewhere in this suite (subprocess.run, hvac.Client,
+    the Kubernetes API are all mocked rather than called for real in unit
+    tests).
     """
     with (
         patch("main.get_jwt_secret", return_value=TEST_JWT_SECRET),
@@ -38,6 +39,7 @@ def vault_secrets_mocked():
             "main.get_minio_credentials",
             return_value=("test-minio-access-key", "test-minio-secret-key"),
         ),
+        patch("main.get_gitea_token", return_value="test-gitea-token"),
     ):
         yield
 

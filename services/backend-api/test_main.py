@@ -32,6 +32,20 @@ def minio_credentials_loaded():
 
 
 @pytest.fixture(autouse=True)
+def gitea_token_loaded():
+    """Simulate main.py's startup call to set the Vault-sourced Gitea token.
+
+    Same reasoning as minio_credentials_loaded above: gitea_client.GITEA_TOKEN
+    is None until main.py's lifespan() sets it, so tests exercising code
+    that reads it need this set explicitly rather than relying on an
+    os.environ-sourced default that no longer exists.
+    """
+    gitea_client.GITEA_TOKEN = "vault-sourced-gitea-token"
+    yield
+    gitea_client.GITEA_TOKEN = None
+
+
+@pytest.fixture(autouse=True)
 def build_and_push_succeeds_by_default(monkeypatch):
     """Most build_macro tests don't care about builder.build_and_push's
     internals (Gitea push + Kaniko Job, both tested in test_builder.py)
@@ -192,6 +206,7 @@ def vault_secrets_mocked():
             "main.get_minio_credentials",
             return_value=("vault-sourced-access-key", "vault-sourced-secret-key"),
         ),
+        patch("main.get_gitea_token", return_value="vault-sourced-gitea-token"),
     ):
         yield
 

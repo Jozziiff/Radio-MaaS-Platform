@@ -135,7 +135,7 @@ from minio import Minio
 from minio.error import S3Error
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
-from vault_client import get_jwt_secret, get_minio_credentials
+from vault_client import get_gitea_token, get_jwt_secret, get_minio_credentials
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -215,10 +215,19 @@ def build_minio_client() -> Minio:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the local kubeconfig, then fetch secrets from Vault, once at startup."""
+    """Load the Kubernetes config, then fetch secrets from Vault, once at startup.
+
+    Tries the pod's own in-cluster service-account config first (works
+    once backend-api itself runs as a Deployment -- see
+    infra/backend-api.yaml); falls back to a local kubeconfig file for the
+    existing `uvicorn --reload` local dev workflow, which stays unchanged.
+    """
     global MINIO_ACCESS_KEY, MINIO_SECRET_KEY
 
-    k8s_config.load_kube_config()
+    try:
+        k8s_config.load_incluster_config()
+    except k8s_config.ConfigException:
+        k8s_config.load_kube_config()
     db.init_db()
 
     jwt_secret = get_jwt_secret()
@@ -231,6 +240,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _mask(MINIO_ACCESS_KEY),
         _mask(MINIO_SECRET_KEY),
     )
+
+    gitea_client.GITEA_TOKEN = get_gitea_token()
+    logger.info("loaded Gitea token from Vault (%s)", _mask(gitea_client.GITEA_TOKEN))
 
     yield
 

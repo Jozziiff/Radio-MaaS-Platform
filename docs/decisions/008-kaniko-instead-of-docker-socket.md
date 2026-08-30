@@ -331,3 +331,44 @@ outside this change's own scope. (One test that asserted the old,
 now-removed `docker rmi` best-effort cleanup behavior in `delete_macro`
 was deleted as part of the final whole-branch review that followed this
 change — see that review's own fix report for detail.)
+
+## Post-merge follow-up: the documented cluster recreate had not actually happened
+
+This document (above, "The fix, and what was ruled out first") records
+that the project's cluster was recreated with `--host-alias
+10.43.99.99:registry`, and that this was approved. That recreate had
+**not** actually happened. A post-merge smoke test — rebuilding and
+running `rtwp-anomaly-demo` again immediately after merging this branch
+to `main` and letting ArgoCD sync it — attempted a real execution-Job
+image pull and failed with `dial tcp: lookup registry: no such host`.
+Checking the live node directly (`docker inspect
+k3d-radio-maas-server-0 --format '{{.HostConfig.ExtraHosts}}'`) showed an
+empty list, and the node's own creation timestamp predated the registry
+Deployment's first apply — the cluster in front of the merged code was
+never actually the one this document described building.
+
+This gap was invisible to every check that ran before it: the
+live-vs-committed manifest diff done right after merging (comparing the
+running `registry` Deployment/Service against the committed
+`infra/registry.yaml`) matched field-for-field, because that check only
+compares Kubernetes object content — it has no way to see node-level
+Docker configuration like `ExtraHosts`, which sits outside anything
+`kubectl` reports on. ArgoCD's own `Synced`/`Healthy` status was equally
+blind to it, for the same reason. Only an actual attempted pull, from a
+real execution Job, surfaced it.
+
+Fixed by doing the cluster recreate for real (`k3d cluster delete` +
+`k3d cluster create --registry-config infra/registries.yaml --host-alias
+10.43.99.99:registry`), then reseeding Vault, MinIO, Gitea, and
+re-bootstrapping ArgoCD from scratch. Reran the same smoke test — build,
+pull, execute, output diff — end to end on the corrected cluster; all
+passed, including a real `Successfully pulled` event.
+
+**What this implies going forward:** a decision doc recording that an
+infrastructure step was taken is not itself proof that it was taken. The
+smoke test — a single real build-and-run of an existing macro — is what
+actually closed this gap, at negligible cost. Treat that kind of
+end-to-end smoke test as a required step after any future cluster-level
+change (a recreate, a node config change, a networking change), not an
+optional nice-to-have layered on top of manifest diffs and GitOps sync
+status.

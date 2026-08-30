@@ -1,0 +1,125 @@
+# M7 (production hardening): backend-api itself, running as a real
+# in-cluster Deployment instead of only ever via `uvicorn` on a
+# developer's own machine -- the more fundamental reachability gap named
+# in docs/decisions/007-scope-pivot-production-hardening.md, ahead of
+# persistence for the other four services. See
+# docs/decisions/009-backend-api-in-cluster-deployment.md.
+#
+# ServiceAccount + Role + RoleBinding: backend-api's own code
+# (main.py, builder.py) creates, polls, and deletes Kubernetes Jobs, and
+# reads their pods' logs on failure -- an in-cluster pod only gets an
+# *identity* from its service account token by default, not
+# *authorization*. Scoped to exactly the real API calls this code makes
+# (confirmed directly from main.py/builder.py, not assumed): create/get/
+# list/watch/delete on Jobs, get/list/watch on Pods and the pods/log
+# subresource (reading a Job's failed pod's logs needs this subresource
+# specifically -- a bare `pods` grant does not implicitly cover it).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backend-api
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backend-api-job-manager
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backend-api-job-manager-binding
+subjects:
+  - kind: ServiceAccount
+    name: backend-api
+roleRef:
+  kind: Role
+  name: backend-api-job-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+# PersistentVolumeClaim for registry.db -- persistent from the very first
+# deploy, never shipped on emptyDir even temporarily (unlike
+# MinIO/Vault/Gitea/the registry today, all still emptyDir -- see
+# docs/decisions/007's persistence item; this is the first of the four+one
+# services to actually get real persistence, precisely because there was
+# no reason to defer it just for this one).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backend-api-db
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend-api
+  template:
+    metadata:
+      labels:
+        app: backend-api
+    spec:
+      serviceAccountName: backend-api
+      imagePullSecrets:
+        - name: registry-push-secret
+      containers:
+        - name: backend-api
+          image: registry:5000/backend-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: REGISTRY_DB_PATH
+              value: /app/data/registry.db
+            - name: GITEA_USERNAME
+              # The account that owns the Vault-sourced secret/gitea
+              # token (see vault_client.get_gitea_token(), read at
+              # startup by main.py's lifespan() -- not a bare env-var
+              # secret any more, see
+              # docs/decisions/005-gitea-artifact-mirror.md's follow-up
+              # note). This is an account name, not a secret, so it
+              # stays a plain value here rather than a secretKeyRef.
+              value: "macros"
+          volumeMounts:
+            - name: registry-db
+              mountPath: /app/data
+      volumes:
+        - name: registry-db
+          persistentVolumeClaim:
+            claimName: backend-api-db
+---
+# ClusterIP: reachable only from inside the cluster, at backend-api:8000.
+# External/LAN reachability (something a colleague's own browser can
+# actually reach) is deliberately a separate, later task -- see
+# docs/decisions/007's ordering (persistence and internal reachability
+# first, external reachability after that's proven working). Proven here
+# via a temporary kubectl port-forward for testing only, not the final
+# access method.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-api
+spec:
+  type: ClusterIP
+  selector:
+    app: backend-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

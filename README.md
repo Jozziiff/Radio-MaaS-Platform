@@ -279,6 +279,7 @@ here only to keep it next to the other one-time Vault-seeding steps.)
 Two *separate* problems can prevent Kaniko/execution Jobs from reaching
 the registry — don't conflate them, they need different fixes:
 
+
 1. **containerd doesn't trust `registry:5000` as insecure HTTP** (missing
    `infra/registries.yaml` trust config) — symptom: an `x509`/TLS error,
    or `http: server gave HTTP response to HTTPS client`. Fixed below,

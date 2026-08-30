@@ -4,6 +4,25 @@
 # Deployment (not a Job) because MinIO is a long-lived service that should
 # keep running and be restarted if it crashes — the opposite of a macro run,
 # which is a single task that should finish and stop.
+#
+# M7 (production hardening): /data is now PVC-backed, not emptyDir — see
+# the PersistentVolumeClaim below and
+# docs/decisions/011-minio-gitea-registry-persistence.md. Swapping
+# emptyDir for a PVC does not migrate whatever was already in the old
+# emptyDir (it's a fresh, empty volume) — this Deployment update requires
+# re-seeding the two buckets afterward, same as any fresh cluster; see
+# that doc for the full re-bootstrap sequence this one-time reset needed.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,11 +68,8 @@ spec:
               mountPath: /data
       volumes:
         - name: data
-          # emptyDir: local-dev only. Storage lives only as long as the pod
-          # does -- a pod restart wipes it. Fine for M3 (proving MinIO works
-          # in-cluster); a real PVC is a later concern once this needs to
-          # actually persist data across restarts.
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: minio-data
 ---
 # ClusterIP: only reachable from inside the cluster, at minio:9000 (API) /
 # minio:9001 (console) -- that's the point, other pods (macro Jobs, the

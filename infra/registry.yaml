@@ -11,6 +11,27 @@
 # their ClusterIP-only network isolation -- the registry follows the
 # same posture rather than being the one exception. Network isolation
 # alone is defense-in-depth here, not a substitute for auth.
+#
+# M7 (production hardening): image blob storage (/var/lib/registry, the
+# registry:2 image's default data path) is now PVC-backed -- previously
+# this had no volume at all, so every pushed layer lived only in the
+# registry container's own ephemeral writable layer. See the
+# PersistentVolumeClaim below and
+# docs/decisions/011-minio-gitea-registry-persistence.md. Unlike
+# MinIO/Gitea, nothing here needed a re-bootstrap sequence: there was no
+# persistent state to lose in the first place, since this PVC didn't
+# exist before.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -42,6 +63,8 @@ spec:
             - name: auth
               mountPath: /auth
               readOnly: true
+            - name: data
+              mountPath: /var/lib/registry
       volumes:
         - name: auth
           secret:
@@ -51,6 +74,9 @@ spec:
             # before this pod can start (same bring-up-order dependency
             # Vault/MinIO seeding already has for backend-api).
             secretName: registry-htpasswd
+        - name: data
+          persistentVolumeClaim:
+            claimName: registry-data
 ---
 # ClusterIP: reachable only from inside the cluster at registry:5000 --
 # same pattern as every other infra/*.yaml Service. Combined with

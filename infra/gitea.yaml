@@ -10,6 +10,27 @@
 # all repos and Gitea's own config. Fine for proving the Gitea-to-ArgoCD
 # wiring works; a real PVC (and likely a real database, not SQLite) is a
 # later concern once this needs to survive restarts.
+#
+# M7 (production hardening): /data is now PVC-backed, not emptyDir --
+# still SQLite (a real external database remains a separate, larger
+# decision not taken here), see the PersistentVolumeClaim below and
+# docs/decisions/011-minio-gitea-registry-persistence.md. Swapping
+# emptyDir for a PVC does not migrate the old emptyDir's contents (fresh,
+# empty volume) -- this specific Deployment update required redoing the
+# first-run admin account + API token through Gitea's web UI, updating
+# Vault's secret/gitea to match, and rebuilding every existing macro to
+# repopulate their mirrored repos; see that doc for the full sequence.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitea-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,10 +70,8 @@ spec:
               mountPath: /data
       volumes:
         - name: data
-          # emptyDir: local-dev only, same as MinIO's storage in M3 and
-          # Vault's in-memory-only -dev mode. Storage lives only as long
-          # as the pod does -- a pod restart wipes every repo.
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: gitea-data
 ---
 # ClusterIP: reachable from inside the cluster at gitea:3000. Reaching it
 # from the host for this verification step goes through kubectl

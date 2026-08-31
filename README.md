@@ -444,10 +444,13 @@ in-cluster Deployment (`infra/backend-api.yaml`) instead of only via local
 eventually use, and the only way to exercise its PVC-backed
 `registry.db` (see [009-backend-api-in-cluster-deployment.md](docs/decisions/009-backend-api-in-cluster-deployment.md)).
 This doesn't replace local dev — `uvicorn --reload`'s faster iteration
-loop is still the better choice while actively changing code:
+loop is still the better choice while actively changing code. Run from
+the repo root, not `services/backend-api/` — the build context is now
+the whole repo because the image also builds the frontend (see the
+root-level `Dockerfile`'s comments):
 
 ```bash
-docker build -t registry:5000/backend-api:latest services/backend-api
+docker build -t registry:5000/backend-api:latest .
 docker push registry:5000/backend-api:latest
 ```
 

@@ -84,6 +84,7 @@ layer to blame yet.
 | A Job ran | `kubectl get jobs` | `<macro_name>-xxxxxxxx`, `Complete`, `1/1` |
 | History recorded it | `curl -H "Authorization: Bearer <token>" localhost:8000/executions` | the job listed, `"status": "succeeded"`, even after the Job itself is gone |
 | The actual result | `mc cat devminio/macro-results/<macro_name>/output.csv` | a CSV with the macro's extra output column(s) |
+| Ingress routes to backend-api | `kubectl run -it --rm ingress-check --image=curlimages/curl --restart=Never -- curl -s -o /dev/null -w "%{http_code}\n" http://traefik.kube-system.svc.cluster.local/health` | `200` |
 
 ## Common recovery actions
 

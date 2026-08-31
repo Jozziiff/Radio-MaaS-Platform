@@ -241,11 +241,49 @@ Verified live against the real cluster during Task 4:
   token from Vault`), with values matching exactly what had just been
   written to the new Vault instance in this same task.
 
-The remaining verification steps from the design spec — Vault surviving
-a real pod restart with `sealed: false` and no manual intervention, and
-a full macro build+execute end-to-end proving the whole chain works
-together — are Task 6's own verification pass, recorded separately once
-it runs.
+**Task 6's own verification pass** (run separately, after Task 5's docs
+landed, confirming the mechanism holds on a genuinely fresh restart, not
+just the very first one):
+
+1. `vault status` re-confirmed `Initialized: true`, `Sealed: false` on
+   the instance left running from Task 4.
+2. `kubectl delete pod -l app=vault` — the new pod reached `2/2 Running`
+   in under two minutes (this time with the Secret already present from
+   the start, so no ~60s "waiting for Secret" phase was needed — it went
+   straight to unsealing). `vault status` showed `Sealed: false` again,
+   with no manual unseal command run. The sidecar's own log for this
+   restart confirmed it: `"vault-unseal-key found, waiting for vault to
+   be unsealed"` → the `vault operator unseal` call succeeding →
+   `"vault unsealed, idling"` — proving this is a real, repeatable,
+   every-restart mechanism, not something that only worked once by
+   coincidence of initial state.
+3. `backend-api` was deliberately restarted too (not just left running
+   from before Vault's restart), specifically so its own Vault read
+   would be a genuinely fresh one against the just-restarted Vault
+   instance, not a stale in-memory value from before. Its new pod's logs
+   showed the same three startup lines, values matching exactly.
+4. Rebuilt `rtwp-anomaly-demo` end to end. First attempt hit a real
+   `409 Conflict` from `POST /macros/rtwp-anomaly-demo/build` — traced
+   to a pre-existing, already-documented race in `builder.py`'s
+   `_delete_stale_kaniko_job` (its `propagation_policy="Foreground"`
+   delete call returns before the old Job's pod has actually finished
+   terminating, so an immediate rebuild of an already-built macro can
+   race the still-terminating prior Job's name). This is a known,
+   accepted limitation stated in that function's own docstring, not a
+   Vault-related regression — confirmed the stale Job's name had cleared
+   (`kubectl get job rtwp-anomaly-demo-build` → `NotFound`) and retried;
+   the retry succeeded (`image_tag:
+   registry:5000/rtwp-anomaly-demo:generated`). Out of scope for this
+   plan to fix, since it predates and is unrelated to the Vault work —
+   noted here only because it surfaced during this task's own
+   verification, not because this task caused it.
+5. Uploaded the sample input (`matched_columns: ["cell_id",
+   "rtwp_dbm"]` — proves MinIO credentials sourced from the new Vault
+   instance work), triggered an execution, and confirmed `status:
+   "succeeded"` — the full chain (Vault → MinIO credentials, Vault →
+   Gitea token, Vault → JWT signing key for the auth that gated every
+   step above) working together end to end, not just Vault being
+   reachable in isolation.
 
 ## Explicitly out of scope (carried from the design spec)
 

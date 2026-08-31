@@ -791,5 +791,3 @@ Frontend changes are currently verified manually against the running app.
 ## License
 
 [Apache License 2.0](LICENSE).
-
-

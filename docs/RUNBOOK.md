@@ -48,7 +48,8 @@ from "the macro script itself is wrong" — don't skip ahead.
 | `kubectl get application radio-maas-infra -n argocd` isn't `Synced`/`Healthy` | ArgoCD hasn't reconciled yet (~3 min default poll interval), or `infra/argocd-app.yaml` was never applied | Wait, or re-apply: `kubectl apply -f infra/argocd-app.yaml -n argocd`. Never `kubectl apply` anything *inside* `infra/` directly — ArgoCD's `selfHeal` will just revert it. |
 | A pod (often Vault, the largest image) sits in `ImagePullBackOff` right after a fresh `kubectl apply`/ArgoCD sync | The image download was interrupted mid-transfer — usually a dropped internet connection. `kubectl describe pod <pod-name>` shows something like `short read: expected N bytes but got M: unexpected EOF`. This is the one point in the whole stack that genuinely needs internet: pulling each infra image (MinIO/Vault/Gitea) the first time it's needed on a given cluster. Once cached locally by Docker, later cluster recreates reuse the cached image and don't need to re-download. | Nothing to fix by hand — reconnect to the internet and wait. Kubernetes retries a failed image pull automatically with its own backoff; no restart or recreate needed. |
 | The catalog lists macros that fail to run (never even reach `pending`) right after a **cluster** recreate (not just a pod restart) | The macro registry (`registry.db`, a local SQLite file) and each macro's *built image in the in-cluster registry* are two separate things. The registry survives a cluster recreate — it's just a file on your machine — but images only ever lived in the old cluster's registry (`infra/registry.yaml`), which a full `k3d cluster delete` throws away completely (unless the registry's own storage is persistent — see the persistent-storage work in M7). The catalog looks populated but every image behind it is gone. | Rebuild each macro that needs to run again — open it in the catalog and save/rebuild (`POST /macros/{name}/build`), which re-runs the Kaniko build (see [008-kaniko-instead-of-docker-socket.md](decisions/008-kaniko-instead-of-docker-socket.md)) and pushes the image to the current cluster's registry. Confirm with `kubectl run -it --rm registry-check --image=curlimages/curl --restart=Never -- curl -s http://registry:5000/v2/<macro_name>/tags/list` if unsure whether a given macro's image actually exists in the current cluster's registry. |
-| Backend (`uvicorn main:app`) fails to start immediately | Vault is unreachable, or `secret/jwt`/`secret/minio` don't exist — Vault dev mode loses everything on every pod restart | Re-seed: see [Getting started, step 4](../README.md#4-seed-vaults-secrets--required-on-every-fresh-cluster) in the README. This is required *every* fresh Vault pod, not a one-time step. |
+| Backend (`uvicorn main:app`) fails to start immediately | Vault is unreachable, `VAULT_TOKEN` isn't set (no more `devroot` default as of M7 — see [012](decisions/012-vault-simplified-unseal.md)), or `secret/jwt`/`secret/minio`/`secret/gitea` don't exist yet. As of M7, Vault is PVC-backed and auto-unseals via its sidecar on an ordinary pod restart — this is now rare in normal operation, not a routine step. It's expected only the *first* time a given Vault instance comes up (a genuinely fresh cluster, or one that lost its `vault-data` PVC). | Get the current root token — `kubectl get secret vault-unseal-key -o jsonpath='{.data.root_token}' \| base64 -d` — and confirm it's actually set as `VAULT_TOKEN`. If the `vault-unseal-key` Secret doesn't exist at all yet, this Vault instance was never initialized — run the one-time sequence in [Getting started, step 4](../README.md#4-seed-vaults-secrets--one-time-per-fresh-vault-instance-not-every-restart). If the secrets themselves are missing but Vault is initialized/unsealed, re-seed them (same step 4, skip straight to the `vault kv put` lines). |
+| `vault status` (or the Vault pod) stays `Sealed: true` for much longer than about a minute after the `vault-unseal-key` Secret was created | Either the Secret genuinely doesn't exist yet (check `kubectl get secret vault-unseal-key` — if missing, Vault was never initialized, see the row above), or it exists but its `unseal_key` value is wrong/stale (e.g. after a `vault operator init` re-run without updating the Secret to match the new key). **The sidecar's logs look identical in both "still starting up" and "key is wrong" cases** — there's no distinguishing log line, a known gotcha from Task 1's review (see [012](decisions/012-vault-simplified-unseal.md)). | `kubectl logs deploy/vault -c vault-unseal` — if it's still printing `"waiting for vault-unseal-key Secret to exist"`, the Secret genuinely isn't there (create it, step 4). If it's past that line and stuck on `"vault-unseal-key found, waiting for vault to be unsealed"` for more than ~2 minutes, suspect a stale/wrong key: re-run `vault operator init` is **not** the fix (Vault is already initialized) — the actual fix is confirming the Secret's `unseal_key` value actually matches what `vault operator init` originally produced, or re-creating the Secret from a correct backup of that key if one exists. If no correct key is recoverable, Vault's raft data is unrecoverable without it — this is real data loss, treat it like a fresh instance (delete `vault-data` PVC, re-init from step 4). |
 | `POST /auth/login` returns connection refused / 404 | Backend isn't running, or you're hitting the wrong port | Confirm `curl localhost:8000/docs` returns the Swagger HTML page. |
 | Every protected endpoint returns `401` | Missing/expired/malformed `Authorization: Bearer <token>` header | Log in again via `POST /auth/login` — tokens expire after a flat 8 hours, no refresh. |
 | `POST /macros/{name}/build` returns `422` with `"error": "syntax_error"` | The submitted Python source doesn't parse | Not a bug — this is the platform working as designed. Fix the line number/message given. |
@@ -86,11 +87,18 @@ layer to blame yet.
 
 ## Common recovery actions
 
-**Re-seed Vault** (needed every time the Vault pod restarts):
+**Re-seed Vault's secrets** (one-time per fresh Vault instance as of
+M7's raft/auto-unseal work — not needed on an ordinary pod restart
+anymore, since Vault's data now survives that. See
+[012](decisions/012-vault-simplified-unseal.md) and [Getting started,
+step 4](../README.md#4-seed-vaults-secrets--one-time-per-fresh-vault-instance-not-every-restart)
+for the full one-time init/enable/re-seed sequence, including the KV v2
+`vault secrets enable` step a real Vault instance needs that `-dev`
+mode used to hide):
 ```bash
 kubectl port-forward svc/vault 8200:8200 &
 export VAULT_ADDR=http://localhost:8200
-export VAULT_TOKEN=devroot
+export VAULT_TOKEN=$(kubectl get secret vault-unseal-key -o jsonpath='{.data.root_token}' | base64 -d)
 vault kv put secret/jwt signing_key="$(openssl rand -hex 32)"
 vault kv put secret/minio access_key=devadmin secret_key=devpassword123
 ```
@@ -136,20 +144,27 @@ your current cluster already has both.
 
 Recreating the cluster is otherwise safe to do at any time, but it is
 **not free** — and, as of
-[010](decisions/010-minio-gitea-registry-persistence.md)'s PVC work,
-**this is now the one recovery path that still loses everything even
-though MinIO/Gitea/the registry are PVC-backed**: those PVCs use the
+[010](decisions/010-minio-gitea-registry-persistence.md)'s and
+[012](decisions/012-vault-simplified-unseal.md)'s PVC work, **this is
+now the one recovery path that still loses everything even though
+MinIO/Gitea/the registry/Vault are all PVC-backed**: those PVCs use the
 `local-path` storage class, which stores data as a plain directory on
 the node container's own filesystem — deleting the node (what
-`k3d cluster delete` does) deletes that storage along with it. PVCs only
-protect against a *pod* restart, not a full cluster recreate. Every
-one-time seeding step in [Getting
+`k3d cluster delete` does) deletes that storage along with it,
+Vault's raft data included. PVCs only protect against a *pod* restart,
+not a full cluster recreate. Every one-time seeding step in [Getting
 started](../README.md#getting-started) must be redone from scratch, in
 order:
 
 1. Redeploy `infra/` via ArgoCD (step 2) — wait for `Synced`/`Healthy`.
 2. Re-seed MinIO's two buckets (step 3).
-3. Re-seed Vault's JWT/MinIO secrets (step 4).
+3. Re-initialize Vault and re-seed its secrets — the full one-time
+   sequence (`vault operator init`, create the `vault-unseal-key`
+   Secret, enable KV v2, re-seed `secret/jwt`/`secret/minio`) from
+   [Getting started, step 4](../README.md#4-seed-vaults-secrets--one-time-per-fresh-vault-instance-not-every-restart) —
+   Vault's raft PVC is gone the same as MinIO/Gitea/the registry's, so
+   this is not a re-seed of an existing instance, it's starting from
+   `Initialized: false` again.
 4. Re-seed the registry credential — Vault, `registry-htpasswd`, and
    `registry-push-secret` together (step 4b).
 5. Re-create Gitea's admin account + API token through its web UI, then
@@ -157,8 +172,8 @@ order:
    Gitea's own storage doesn't survive a cluster recreate any more than
    MinIO's does.
 6. Restart `backend-api` (`kubectl delete pod -l app=backend-api`) so it
-   picks up the new Gitea token instead of holding the old one from its
-   last startup read.
+   picks up the new Gitea token and the new Vault root token instead of
+   holding stale ones from its last startup read.
 7. Rebuild any macros you want available again — their images lived only
    in the old cluster's registry, and their Gitea-mirrored repos only in
    the old Gitea instance.

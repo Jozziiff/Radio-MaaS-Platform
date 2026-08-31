@@ -90,7 +90,7 @@ For the full mission, roadmap, and background context, see
 - **Platform:** Docker, k3d (local Kubernetes)
 - **Storage:** MinIO (macro input/output objects), SQLite (macro registry +
   execution history)
-- **Secrets:** HashiCorp Vault (dev mode)
+- **Secrets:** HashiCorp Vault (raft storage, 1-of-1 auto-unseal sidecar)
 - **GitOps / version history:** ArgoCD (watching GitHub), Gitea (per-macro
   artifact mirror)
 
@@ -194,24 +194,71 @@ docker run --rm --entrypoint sh minio/mc -c "
 "
 ```
 
-### 4. Seed Vault's secrets — **required on every fresh cluster**
+### 4. Seed Vault's secrets — **one-time per fresh Vault instance, not every restart**
 
-Vault runs in `-dev` mode (`infra/vault.yaml`): in-memory only, no
-persistent storage backend. **Every secret is lost on pod restart or
-cluster recreation**, so this step isn't a one-time setup — it must be
-repeated any time the Vault pod comes up fresh.
+As of M7, Vault runs with real raft (integrated storage) persistence
+and a 1-of-1 Shamir seal auto-unsealed by a sidecar
+(`infra/vault.yaml`) — it survives an ordinary pod restart with its
+data intact, the same PVC-backed pattern already used for
+MinIO/Gitea/the registry. See
+[012-vault-simplified-unseal.md](docs/decisions/012-vault-simplified-unseal.md)
+for the full design and the security trade-offs of the simplified seal.
+
+This means the steps below are a **one-time setup per Vault instance**
+(a genuinely fresh cluster, or a Vault pod that lost its PVC) — check
+first, don't run blindly:
 
 ```bash
 kubectl port-forward svc/vault 8200:8200 &
 export VAULT_ADDR=http://localhost:8200
-export VAULT_TOKEN=devroot   # the fixed dev root token, see infra/vault.yaml
+vault status   # Initialized: true, Sealed: false -> already set up, skip to step 5
+```
 
+If it's not yet initialized, run the one-time sequence:
+
+```bash
+# 1. Initialize with a single key share (see 012 for why 1-of-1 is a
+#    deliberate, named simplification, not an oversight)
+kubectl exec deploy/vault -- vault operator init \
+  -key-shares=1 -key-threshold=1 -format=json > /tmp/vault-init.json
+
+# 2. Store the unseal key and root token where the sidecar (and
+#    backend-api, via infra/backend-api.yaml) read them from
+kubectl create secret generic vault-unseal-key \
+  --from-literal=unseal_key="$(jq -r '.unseal_keys_b64[0]' /tmp/vault-init.json)" \
+  --from-literal=root_token="$(jq -r '.root_token' /tmp/vault-init.json)"
+rm -f /tmp/vault-init.json
+
+# The vault-unseal sidecar is already polling for this Secret -- no pod
+# restart needed. It unseals automatically within its retry interval
+# (observed ~60s, matching Kubernetes' Secret-volume sync delay).
+
+export VAULT_TOKEN=$(kubectl get secret vault-unseal-key -o jsonpath='{.data.root_token}' | base64 -d)
+
+# 3. Enable KV v2 at secret/ -- confirmed NOT automatic outside -dev
+#    mode (a real Vault server has no engine mounted at secret/ by
+#    default; -dev mode's auto-mount was masking this). Skipping this
+#    step produces a confusing InvalidPath error from vault_client.py,
+#    not an obviously-missing-engine error.
+vault secrets enable -path secret -version=2 kv
+
+# 4. Re-seed the three secrets backend-api reads at startup
 vault kv put secret/jwt signing_key="$(openssl rand -hex 32)"
 vault kv put secret/minio access_key=devadmin secret_key=devpassword123
 ```
 
-`backend-api` reads both of these once at its own startup
-(`vault_client.py`) and fails to start if either is missing.
+`secret/gitea` is seeded separately, in step 4c below, once a Gitea
+token exists.
+
+`backend-api` reads all three once at its own startup
+(`vault_client.py`) and fails to start if any is missing. In-cluster,
+it gets its `VAULT_TOKEN` automatically via `secretKeyRef` (no manual
+step); for local `uvicorn --reload` dev, get the root token the same
+way any time you need it:
+
+```bash
+export VAULT_TOKEN=$(kubectl get secret vault-unseal-key -o jsonpath='{.data.root_token}' | base64 -d)
+```
 
 ### 4b. Seed the registry credential — **required on every fresh cluster**
 
@@ -394,6 +441,7 @@ python -m venv .venv
 
 cd services/backend-api
 export VAULT_ADDR=http://localhost:8200      # already set above if same shell
+export VAULT_TOKEN=$(kubectl get secret vault-unseal-key -o jsonpath='{.data.root_token}' | base64 -d)   # already set in step 4 if same shell
 export MINIO_ENDPOINT=localhost:9000          # backend-api runs on the host, not in-cluster
 uvicorn main:app --reload
 ```
@@ -683,24 +731,29 @@ Frontend changes are currently verified manually against the running app.
 
 ## Known limitations
 
-- **Vault runs in dev mode.** In-memory only, a single hardcoded root
-  token, no AppRole/Kubernetes auth, no External Secrets Operator layer.
-  Every secret is lost on pod restart and must be re-seeded (see
-  [Getting started, step 4](#4-seed-vaults-secrets--required-on-every-fresh-cluster)).
-  See [003-vault-secret-management-simplifications.md](docs/decisions/003-vault-secret-management-simplifications.md).
-- **Vault is the one service still on non-persistent storage.** `-dev`
-  mode is in-memory only — see the bullet above. `backend-api`, MinIO,
-  Gitea, and the in-cluster registry are all PVC-backed as of M7 and
-  survive a pod restart — see
-  [009-backend-api-in-cluster-deployment.md](docs/decisions/009-backend-api-in-cluster-deployment.md)
-  and
-  [010-minio-gitea-registry-persistence.md](docs/decisions/010-minio-gitea-registry-persistence.md).
-  **Caveat that applies to all of them, Vault included:** the PVCs use
-  k3d's `local-path` storage class, which stores data on the node
-  container's own filesystem — a full `k3d cluster delete`/`create`
-  (not just a pod restart) still loses everything, since the node itself
-  is gone. See [docs/RUNBOOK.md](docs/RUNBOOK.md)'s "Recover a stranded
-  k3d cluster" for the full re-seeding checklist that requires.
+- **Vault is now PVC-backed, no longer the exception.** As of M7, Vault
+  runs with real raft (integrated storage) persistence and a 1-of-1
+  Shamir seal, auto-unsealed by a sidecar reading a Kubernetes Secret —
+  no more `-dev` mode, no more re-seeding every secret on every pod
+  restart (see
+  [Getting started, step 4](#4-seed-vaults-secrets--one-time-per-fresh-vault-instance-not-every-restart)
+  for the one-time init sequence). `backend-api`, MinIO, Gitea, and the
+  in-cluster registry are all PVC-backed as of M7 the same way. The
+  1-of-1 seal and using the root token as `backend-api`'s standing
+  credential are both **deliberate, named simplifications**, not
+  oversights — see
+  [012-vault-simplified-unseal.md](docs/decisions/012-vault-simplified-unseal.md)
+  for the full trade-off reasoning and the explicit conditions under
+  which each should be revisited. (Superseded:
+  [003-vault-secret-management-simplifications.md](docs/decisions/003-vault-secret-management-simplifications.md)
+  documented the earlier `-dev`-mode-only state.)
+  **Caveat that applies to Vault the same as MinIO/Gitea/the registry:**
+  the PVCs use k3d's `local-path` storage class, which stores data on
+  the node container's own filesystem — a full `k3d cluster
+  delete`/`create` (not just a pod restart) still loses everything,
+  since the node itself is gone, including Vault's raft data. See
+  [docs/RUNBOOK.md](docs/RUNBOOK.md)'s "Recover a stranded k3d cluster"
+  for the full re-seeding checklist that requires.
 - **No registry-side image cleanup.** `DELETE /macros/{technical_name}`
   removes a macro's database row and Gitea reference, but does not delete
   its built image from the in-cluster registry — that would need a

@@ -119,12 +119,14 @@ survived from before and nothing more needs doing.
 
 ## 4. Seed Vault's secrets
 
-Vault runs in dev mode, so it forgets everything on every pod restart —
-unlike MinIO/Gitea/the registry, this one has **no PVC exception yet**
-(see [Known limitations](../README.md#known-limitations)). **Don't
-assume you can skip this one** — just run it; it's harmless to run again
-even if the secrets are already there (it simply overwrites them with
-new ones, which is fine).
+As of M7, Vault runs with real raft (integrated storage) persistence
+and a 1-of-1 Shamir seal, auto-unsealed by a sidecar container — it
+survives an ordinary pod restart with its data intact, the same
+PVC-backed pattern as MinIO/Gitea/the registry (see
+[012-vault-simplified-unseal.md](decisions/012-vault-simplified-unseal.md)
+for the full design and its named trade-offs). **Check first** — this
+is now a one-time setup per Vault instance, not a repeat-every-time
+step:
 
 **Terminal tab 4** — leave this port-forward running (don't close this
 tab or press Ctrl+C in it):
@@ -133,20 +135,66 @@ tab or press Ctrl+C in it):
 kubectl port-forward svc/vault 8200:8200
 ```
 
-**Terminal tab 3 (reuse it)** — there's no `vault` CLI on this machine,
-so these use `curl` directly against Vault's HTTP API instead (does the
-same thing):
+**Terminal tab 3 (reuse it)**:
 
 ```bash
-curl -H "X-Vault-Token: devroot" -X POST http://localhost:8200/v1/secret/data/jwt \
+curl -s http://localhost:8200/v1/sys/health
+```
+
+- If that shows `"initialized":true` and `"sealed":false`, **Vault's
+  already set up on this cluster — skip straight to step 4b.**
+- If it shows `"initialized":false`, this is a genuinely fresh Vault
+  (a new cluster, or one that lost its `vault-data` PVC) — run the
+  one-time sequence below. There's no `vault` CLI on this machine, so
+  every step uses `curl` directly against Vault's HTTP API instead
+  (does the same thing):
+
+```bash
+# 1. Initialize with a single key share (see 012-vault-simplified-unseal.md
+#    for why 1-of-1 is a deliberate, named simplification)
+curl -s -X POST http://localhost:8200/v1/sys/init \
+  -d '{"secret_shares":1,"secret_threshold":1}' > /tmp/vault-init.json
+cat /tmp/vault-init.json
+```
+
+Copy the `keys[0]` (or `keys_base64[0]`) and `root_token` values from
+that output, then:
+
+```bash
+# 2. Store them where the sidecar (and backend-api) read from
+kubectl create secret generic vault-unseal-key \
+  --from-literal=unseal_key=<the key you copied> \
+  --from-literal=root_token=<the root token you copied>
+rm -f /tmp/vault-init.json
+```
+
+The `vault-unseal` sidecar is already polling for this Secret — no pod
+restart needed. It unseals automatically within its retry interval
+(observed ~60s, matching Kubernetes' Secret-volume sync delay). Confirm
+with `curl -s http://localhost:8200/v1/sys/health` again once a minute
+or so has passed — expect `"sealed":false`.
+
+```bash
+export VAULT_TOKEN=<the root token you copied above>
+
+# 3. Enable KV v2 at secret/ -- confirmed NOT automatic outside -dev
+#    mode. Skipping this produces a confusing "invalid path" error later,
+#    not an obviously-missing-engine error.
+curl -H "X-Vault-Token: $VAULT_TOKEN" -X POST http://localhost:8200/v1/sys/mounts/secret \
+  -d '{"type":"kv","options":{"version":"2"}}'
+
+# 4. Re-seed the two secrets backend-api reads at startup
+curl -H "X-Vault-Token: $VAULT_TOKEN" -X POST http://localhost:8200/v1/secret/data/jwt \
   -d "{\"data\":{\"signing_key\":\"$(openssl rand -hex 32)\"}}"
 
-curl -H "X-Vault-Token: devroot" -X POST http://localhost:8200/v1/secret/data/minio \
+curl -H "X-Vault-Token: $VAULT_TOKEN" -X POST http://localhost:8200/v1/secret/data/minio \
   -d '{"data":{"access_key":"devadmin","secret_key":"devpassword123"}}'
 ```
 
 Each should print back a JSON response with no `"errors"` field. If you
 see a connection error, your port-forward in tab 4 isn't up yet.
+`secret/gitea` is seeded separately in step 5 below, once a Gitea token
+exists.
 
 ## 4b. Seed the registry credential
 
@@ -206,7 +254,8 @@ follow-up section — there is **no** `GITEA_TOKEN` environment variable
 any more, that pattern is retired):
 
 ```bash
-curl -H "X-Vault-Token: devroot" -X POST http://localhost:8200/v1/secret/data/gitea \
+export VAULT_TOKEN=$(kubectl get secret vault-unseal-key -o jsonpath='{.data.root_token}' | base64 -d)
+curl -H "X-Vault-Token: $VAULT_TOKEN" -X POST http://localhost:8200/v1/secret/data/gitea \
   -d "{\"data\":{\"token\":\"<the token from above>\"}}"
 ```
 
@@ -258,7 +307,7 @@ Then, either way, start the server:
 ```bash
 cd services/backend-api
 export VAULT_ADDR=http://localhost:8200
-export VAULT_TOKEN=devroot
+export VAULT_TOKEN=$(kubectl get secret vault-unseal-key -o jsonpath='{.data.root_token}' | base64 -d)
 export MINIO_ENDPOINT=localhost:9000
 uvicorn main:app --reload
 ```
@@ -338,13 +387,15 @@ enough. The cluster itself keeps running in Docker in the background
 until you either restart your machine or explicitly delete it — you
 don't need to delete it between ordinary sessions.
 
-Between sessions on the **same** cluster, only step 4 (Vault) needs
-re-running every time — it's the one service still without a PVC (see
-[Known limitations](../README.md#known-limitations)). MinIO, the
-registry, and Gitea (steps 3, 4b, 5) are PVC-backed as of M7 and survive
-an ordinary pod restart or machine reboot; only re-run those if
-`kubectl get pods` shows one of them actually restarted, or if you
-recreated the cluster (see the next paragraph).
+Between sessions on the **same** cluster, none of steps 3/4/4b/5
+(MinIO, Vault, the registry, Gitea) need re-running — all four are
+PVC-backed as of M7 (Vault's own raft/auto-unseal work is
+[012-vault-simplified-unseal.md](decisions/012-vault-simplified-unseal.md))
+and survive an ordinary pod restart or machine reboot. Only re-run one
+of them if `kubectl get pods` shows it actually restarted with a fresh
+PVC (rare — a PVC only goes away with the node itself, see the next
+paragraph), or if `vault status`/`curl .../sys/health` ever shows
+`"initialized":false` unexpectedly.
 
 If you ever run `k3d cluster delete radio-maas` yourself, or recover
 from a stranded/broken cluster (see

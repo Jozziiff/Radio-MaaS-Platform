@@ -288,3 +288,117 @@ def test_init_db_adds_gitea_repo_url_to_a_pre_existing_table(tmp_path, monkeypat
 
     row = db.get_macro("rtwp-anomaly-demo")
     assert row["gitea_repo_url"] is None
+
+
+# --- users table (M7) ---
+
+
+def test_seed_admin_if_empty_inserts_one_admin_row():
+    db.seed_admin_if_empty("admin", "a-bcrypt-hash", "2026-08-31T00:00:00+00:00")
+
+    users = db.list_users()
+    assert len(users) == 1
+    assert users[0]["username"] == "admin"
+    assert users[0]["role"] == "admin"
+
+
+def test_seed_admin_if_empty_is_a_noop_when_users_already_exist():
+    db.create_user("someone", "a-hash", "employee", "2026-08-31T00:00:00+00:00")
+
+    db.seed_admin_if_empty("admin", "another-hash", "2026-08-31T00:00:00+00:00")
+
+    users = db.list_users()
+    assert len(users) == 1
+    assert users[0]["username"] == "someone"
+
+
+def test_create_user_returns_a_new_id():
+    user_id = db.create_user("alice", "a-hash", "employee", "2026-08-31T00:00:00+00:00")
+
+    assert isinstance(user_id, int)
+    assert db.get_user(user_id)["username"] == "alice"
+
+
+def test_create_user_rejects_duplicate_username():
+    db.create_user("alice", "a-hash", "employee", "2026-08-31T00:00:00+00:00")
+
+    with pytest.raises(db.UsernameTakenError):
+        db.create_user("alice", "a-different-hash", "admin", "2026-08-31T00:00:01+00:00")
+
+
+def test_create_user_rejects_invalid_role():
+    with pytest.raises(db.InvalidRoleError):
+        db.create_user("alice", "a-hash", "superuser", "2026-08-31T00:00:00+00:00")
+
+
+def test_list_users_never_includes_password_hash():
+    db.create_user("alice", "a-secret-hash", "employee", "2026-08-31T00:00:00+00:00")
+
+    users = db.list_users()
+
+    assert "password_hash" not in users[0].keys()
+
+
+def test_get_user_by_username_returns_password_hash_for_login_check():
+    db.create_user("alice", "a-secret-hash", "employee", "2026-08-31T00:00:00+00:00")
+
+    row = db.get_user_by_username("alice")
+
+    assert row["password_hash"] == "a-secret-hash"
+
+
+def test_get_user_by_username_returns_none_for_unknown_username():
+    assert db.get_user_by_username("nobody") is None
+
+
+def test_count_admins_counts_only_admin_role():
+    db.create_user("admin1", "a-hash", "admin", "2026-08-31T00:00:00+00:00")
+    db.create_user("admin2", "a-hash", "admin", "2026-08-31T00:00:01+00:00")
+    db.create_user("emp1", "a-hash", "employee", "2026-08-31T00:00:02+00:00")
+
+    assert db.count_admins() == 2
+
+
+def test_update_user_changes_role_only():
+    user_id = db.create_user("alice", "old-hash", "employee", "2026-08-31T00:00:00+00:00")
+
+    updated = db.update_user(user_id, "admin", None)
+
+    assert updated is True
+    row = db.get_user(user_id)
+    assert row["role"] == "admin"
+
+
+def test_update_user_changes_password_only(monkeypatch):
+    user_id = db.create_user("alice", "old-hash", "employee", "2026-08-31T00:00:00+00:00")
+
+    updated = db.update_user(user_id, None, "new-hash")
+
+    assert updated is True
+    assert db.get_user_by_username("alice")["password_hash"] == "new-hash"
+    # role untouched
+    assert db.get_user(user_id)["role"] == "employee"
+
+
+def test_update_user_returns_false_for_unknown_id():
+    assert db.update_user(999, "admin", None) is False
+
+
+def test_update_user_rejects_invalid_role():
+    user_id = db.create_user("alice", "a-hash", "employee", "2026-08-31T00:00:00+00:00")
+
+    with pytest.raises(db.InvalidRoleError):
+        db.update_user(user_id, "superuser", None)
+
+
+def test_delete_user_removes_the_row():
+    user_id = db.create_user("alice", "a-hash", "employee", "2026-08-31T00:00:00+00:00")
+
+    deleted = db.delete_user(user_id)
+
+    assert deleted is True
+    assert db.get_user(user_id) is None
+
+
+def test_delete_user_returns_false_for_unknown_id():
+    assert db.delete_user(999) is False

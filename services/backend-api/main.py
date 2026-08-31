@@ -121,6 +121,8 @@ from auth import (
     ADMIN_USERNAME,
     create_token,
     get_current_user,
+    hash_password,
+    require_admin,
     set_jwt_secret,
     verify_password,
 )
@@ -229,6 +231,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except k8s_config.ConfigException:
         k8s_config.load_kube_config()
     db.init_db()
+    db.seed_admin_if_empty(
+        ADMIN_USERNAME, ADMIN_PASSWORD_HASH, datetime.now(timezone.utc).isoformat()
+    )
 
     jwt_secret = get_jwt_secret()
     set_jwt_secret(jwt_secret)
@@ -378,6 +383,41 @@ class LoginResponse(BaseModel):
     access_token: str
 
 
+class UserOut(BaseModel):
+    """One user as returned by GET /users and POST /users -- never password_hash."""
+
+    id: int
+    username: str
+    role: str
+    created_at: str
+
+
+class CreateUserRequest(BaseModel):
+    """Request body for POST /users."""
+
+    username: str
+    password: str
+    role: str
+
+
+class UpdateUserRequest(BaseModel):
+    """Request body for PUT /users/{id}.
+
+    Both fields optional: a caller can change just the role, just the
+    password, or both -- username is deliberately not here at all, kept
+    immutable per docs/decisions/013-per-user-accounts.md.
+    """
+
+    role: str | None = None
+    password: str | None = None
+
+
+class UserDeleted(BaseModel):
+    """Response body for a successful DELETE /users/{id}."""
+
+    id: int
+
+
 class BuiltMacro(BaseModel):
     """One entry in the GET /macros registry listing."""
 
@@ -491,16 +531,110 @@ def map_job_status(status: k8s_client.V1JobStatus) -> str:
 
 @app.post("/auth/login", response_model=LoginResponse)
 def login(credentials: LoginRequest) -> LoginResponse:
-    """Exchange the hardcoded dev admin credentials for a JWT.
+    """Exchange real per-user credentials for a JWT (M7: db.py's users table).
 
-    Always runs the password check, even when the username is already
-    wrong, and raises the identical 401 either way -- so neither the
-    response body nor the time taken reveals which part was incorrect.
+    Always runs a password check, even when the username doesn't exist
+    (against ADMIN_PASSWORD_HASH as a fixed dummy hash in that case), and
+    raises the identical 401 either way -- so neither the response body
+    nor the time taken reveals whether the username or the password was
+    wrong. See docs/decisions/013-per-user-accounts.md.
     """
-    password_ok = verify_password(credentials.password, ADMIN_PASSWORD_HASH)
-    if credentials.username != ADMIN_USERNAME or not password_ok:
+    user = db.get_user_by_username(credentials.username)
+    password_hash = user["password_hash"] if user is not None else ADMIN_PASSWORD_HASH
+    password_ok = verify_password(credentials.password, password_hash)
+    if user is None or not password_ok:
         raise HTTPException(status_code=401, detail="incorrect username or password")
-    return LoginResponse(access_token=create_token(credentials.username))
+    return LoginResponse(
+        access_token=create_token(user["username"], user_id=user["id"], role=user["role"])
+    )
+
+
+@app.get("/users", response_model=list[UserOut], dependencies=[Depends(require_admin)])
+def list_users() -> list[UserOut]:
+    """List every user account. Admin-only -- see docs/decisions/013-per-user-accounts.md."""
+    return [UserOut(**dict(row)) for row in db.list_users()]
+
+
+@app.post("/users", response_model=UserOut, dependencies=[Depends(require_admin)])
+def create_user(request: CreateUserRequest) -> UserOut:
+    """Create a new user account. Admin-only.
+
+    409s on a duplicate username, 422 on an invalid role -- both are
+    caller mistakes, not server errors, so neither should surface as a
+    raw 500.
+    """
+    if request.role not in db.VALID_ROLES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{request.role}' is not a valid role; must be one of {sorted(db.VALID_ROLES)}",
+        )
+    password_hash = hash_password(request.password)
+    try:
+        user_id = db.create_user(
+            request.username,
+            password_hash,
+            request.role,
+            datetime.now(timezone.utc).isoformat(),
+        )
+    except db.UsernameTakenError:
+        raise HTTPException(
+            status_code=409, detail=f"username '{request.username}' is already taken"
+        ) from None
+    user = db.get_user(user_id)
+    return UserOut(**dict(user))
+
+
+@app.put("/users/{user_id}", response_model=UserOut, dependencies=[Depends(require_admin)])
+def update_user(user_id: int, request: UpdateUserRequest) -> UserOut:
+    """Update a user's role and/or reset their password. Admin-only.
+
+    Username is deliberately not updatable here -- kept immutable per
+    docs/decisions/013-per-user-accounts.md. Blocks demoting the last
+    remaining admin (the same "don't end up with zero admins" guard
+    DELETE /users/{id} enforces) -- checked before the write, using the
+    target user's *current* role, so demoting a non-admin (a no-op on
+    admin count) is never blocked.
+    """
+    existing = db.get_user(user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"user {user_id} not found")
+
+    if request.role is not None and request.role not in db.VALID_ROLES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{request.role}' is not a valid role; must be one of {sorted(db.VALID_ROLES)}",
+        )
+
+    demoting_from_admin = (
+        existing["role"] == "admin" and request.role is not None and request.role != "admin"
+    )
+    if demoting_from_admin and db.count_admins() <= 1:
+        raise HTTPException(status_code=400, detail="cannot demote the only admin")
+
+    password_hash = hash_password(request.password) if request.password is not None else None
+    db.update_user(user_id, request.role, password_hash)
+    return UserOut(**dict(db.get_user(user_id)))
+
+
+@app.delete("/users/{user_id}", response_model=UserDeleted, dependencies=[Depends(require_admin)])
+def delete_user(user_id: int) -> UserDeleted:
+    """Delete a user account. Admin-only.
+
+    Blocks deleting the only remaining admin, with a clear 400 -- the
+    system must never end up with zero admins (no one left who could
+    create a new one). Checked against the target user's own role, not
+    the caller's -- an admin deleting a different admin still needs this
+    guard.
+    """
+    existing = db.get_user(user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"user {user_id} not found")
+
+    if existing["role"] == "admin" and db.count_admins() <= 1:
+        raise HTTPException(status_code=400, detail="cannot delete the only admin")
+
+    db.delete_user(user_id)
+    return UserDeleted(id=user_id)
 
 
 @app.post(

@@ -72,12 +72,14 @@ def test_create_token_expires_in_about_eight_hours():
     assert abs((expires_at - expected).total_seconds()) < 5
 
 
-def test_get_current_user_returns_username_for_valid_token():
-    token = create_token(ADMIN_USERNAME)
+def test_get_current_user_returns_identity_for_valid_token():
+    token = create_token(ADMIN_USERNAME, user_id=1, role="admin")
 
-    username = get_current_user(_bearer(token))
+    current_user = get_current_user(_bearer(token))
 
-    assert username == ADMIN_USERNAME
+    assert current_user.username == ADMIN_USERNAME
+    assert current_user.user_id == 1
+    assert current_user.role == "admin"
 
 
 def test_get_current_user_raises_401_for_missing_credentials():

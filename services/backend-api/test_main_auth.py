@@ -156,6 +156,125 @@ def test_get_execution_result_requires_auth():
     assert response.status_code == 401
 
 
+def test_login_token_payload_includes_user_id_and_role():
+    """M7: the seeded admin's real user_id/role, not the pre-M7 defaults."""
+    with TestClient(app) as client:
+        response = client.post(
+            "/auth/login", json={"username": "admin", "password": "devpassword123"}
+        )
+        token = response.json()["access_token"]
+
+    from jose import jwt
+
+    payload = jwt.decode(token, TEST_JWT_SECRET, algorithms=["HS256"])
+    assert payload["role"] == "admin"
+    assert isinstance(payload["user_id"], int)
+
+
+def test_admin_can_create_a_user():
+    with TestClient(app) as client:
+        admin_token = client.post(
+            "/auth/login", json={"username": "admin", "password": "devpassword123"}
+        ).json()["access_token"]
+
+        response = client.post(
+            "/users",
+            json={"username": "employee1", "password": "some-password", "role": "employee"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["username"] == "employee1"
+    assert body["role"] == "employee"
+    assert "password_hash" not in body
+
+
+def test_employee_login_works_and_is_forbidden_from_users_endpoint():
+    with TestClient(app) as client:
+        admin_token = client.post(
+            "/auth/login", json={"username": "admin", "password": "devpassword123"}
+        ).json()["access_token"]
+        client.post(
+            "/users",
+            json={"username": "employee1", "password": "employee-password", "role": "employee"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+        login_response = client.post(
+            "/auth/login", json={"username": "employee1", "password": "employee-password"}
+        )
+        employee_token = login_response.json()["access_token"]
+
+        users_response = client.get(
+            "/users", headers={"Authorization": f"Bearer {employee_token}"}
+        )
+
+    assert login_response.status_code == 200
+    assert users_response.status_code == 403
+
+
+def test_cannot_delete_the_only_admin():
+    with TestClient(app) as client:
+        admin_token = client.post(
+            "/auth/login", json={"username": "admin", "password": "devpassword123"}
+        ).json()["access_token"]
+        admin_id = client.get(
+            "/users", headers={"Authorization": f"Bearer {admin_token}"}
+        ).json()[0]["id"]
+
+        response = client.delete(
+            f"/users/{admin_id}", headers={"Authorization": f"Bearer {admin_token}"}
+        )
+
+    assert response.status_code == 400
+
+
+def test_can_delete_an_admin_once_a_second_admin_exists():
+    with TestClient(app) as client:
+        admin_token = client.post(
+            "/auth/login", json={"username": "admin", "password": "devpassword123"}
+        ).json()["access_token"]
+        admin_id = client.get(
+            "/users", headers={"Authorization": f"Bearer {admin_token}"}
+        ).json()[0]["id"]
+
+        client.post(
+            "/users",
+            json={"username": "admin2", "password": "some-password", "role": "admin"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+        response = client.delete(
+            f"/users/{admin_id}", headers={"Authorization": f"Bearer {admin_token}"}
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"id": admin_id}
+
+
+def test_create_user_with_duplicate_username_returns_409():
+    with TestClient(app) as client:
+        admin_token = client.post(
+            "/auth/login", json={"username": "admin", "password": "devpassword123"}
+        ).json()["access_token"]
+
+        response = client.post(
+            "/users",
+            json={"username": "admin", "password": "irrelevant", "role": "employee"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+    assert response.status_code == 409
+
+
+def test_users_endpoints_require_auth():
+    with TestClient(app) as client:
+        response = client.get("/users")
+
+    assert response.status_code == 401
+
+
 def test_analyze_succeeds_with_a_valid_token():
     with TestClient(app) as client:
         # Created only after entering the context, so the app's lifespan

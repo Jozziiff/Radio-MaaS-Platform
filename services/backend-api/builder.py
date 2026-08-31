@@ -64,7 +64,7 @@ REGISTRY_DOCKER_CONFIG_SECRET = "registry-push-secret"
 _WRAPPER_TEMPLATE_PATH = Path(__file__).parent / "templates" / "wrapper.py"
 
 
-def build_and_push(macro_name: str, source_code: str) -> str:
+def build_and_push(macro_name: str, source_code: str, author_username: str) -> str:
     """Push a macro's generated artifacts to Gitea, then build+push its image via Kaniko.
 
     Args:
@@ -72,6 +72,11 @@ def build_and_push(macro_name: str, source_code: str) -> str:
             lowercase, hyphenated -- see db.py's schema) and to derive
             the image tag ("{REGISTRY_HOST}/{macro_name}:generated").
         source_code: Raw Python source of the macro script.
+        author_username: The real employee who triggered this build (M7
+            attribution, docs/decisions/013-per-user-accounts.md) --
+            passed straight through to gitea_client.push_artifacts so the
+            resulting Gitea commit is attributed to them, not the Gitea
+            service account that actually holds the API token.
 
     Returns:
         The full registry-qualified image tag,
@@ -100,7 +105,7 @@ def build_and_push(macro_name: str, source_code: str) -> str:
             "macro.py": source_code,
             "wrapper.py": _WRAPPER_TEMPLATE_PATH.read_text(),
         }
-        gitea_client.push_artifacts(macro_name, files)
+        gitea_client.push_artifacts(macro_name, files, author_username)
     except gitea_client.GiteaError as exc:
         raise RuntimeError(f"Gitea push failed, cannot build without a build context: {exc}") from exc
 

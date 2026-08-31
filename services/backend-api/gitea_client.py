@@ -69,7 +69,18 @@ def _headers() -> dict[str, str]:
 
 
 def ensure_repo(technical_name: str) -> str:
-    """A macro's Gitea repo, creating it (private, no auto-init) if it doesn't exist yet.
+    """A macro's Gitea repo, creating it (public, no auto-init) if it doesn't exist yet.
+
+    M7 (continued): created public, not private -- see
+    docs/decisions/013-per-user-accounts.md's Gitea-attribution addendum.
+    This Gitea instance is internal-only (never exposed externally, same
+    reasoning as the platform's own GitHub repo), so there's no real
+    confidentiality need for per-repo privacy, and privacy was only ever
+    getting in the way of colleagues browsing a macro's history without
+    each needing their own Gitea account. REQUIRE_SIGNIN_VIEW is off on
+    this instance (confirmed directly against its app.ini, not assumed),
+    so a public repo is actually viewable with no login, not just
+    "public" in name.
 
     Args:
         technical_name: Also used as the Gitea repo name -- macro technical
@@ -106,7 +117,7 @@ def ensure_repo(technical_name: str) -> str:
         create_response = requests.post(
             f"{GITEA_URL}/api/v1/user/repos",
             headers=_headers(),
-            json={"name": technical_name, "private": True, "auto_init": False},
+            json={"name": technical_name, "private": False, "auto_init": False},
             timeout=10,
         )
     except requests.exceptions.RequestException as exc:
@@ -120,7 +131,22 @@ def ensure_repo(technical_name: str) -> str:
     return create_response.json()["html_url"]
 
 
-def push_artifacts(technical_name: str, files: dict[str, str]) -> None:
+def synthetic_email_for(username: str) -> str:
+    """A valid-format but intentionally non-deliverable email for `username`.
+
+    M7 (continued): the users table (db.py) only has username/
+    password_hash/role -- no real email address exists to attribute a
+    Gitea commit to. "{username}@radio-maas.local" is valid-format enough
+    for Gitea's Identity.email field (an RFC 5322-shaped address) and
+    unambiguously ties a commit back to a specific employee account, but
+    ".local" is a reserved, non-routable TLD (RFC 6762) -- nothing will
+    ever be sent to it, and it's not meant to be a real deliverable
+    address, just a stable per-user identity string.
+    """
+    return f"{username}@radio-maas.local"
+
+
+def push_artifacts(technical_name: str, files: dict[str, str], author_username: str) -> None:
     """Create or update each {filename: content} pair in a macro's Gitea repo.
 
     For each file, checks whether it already exists (via Gitea's contents
@@ -135,16 +161,22 @@ def push_artifacts(technical_name: str, files: dict[str, str]) -> None:
         technical_name: The macro's Gitea repo, assumed to already exist
             (call ensure_repo first).
         files: Filename to full file content, e.g. {"Dockerfile": "..."}.
+        author_username: The real employee who triggered this build (M7
+            attribution, docs/decisions/013-per-user-accounts.md) --
+            recorded as both the commit's author and committer, with a
+            synthetic_email_for() email, so the commit shows the real
+            employee rather than the Gitea service account that actually
+            holds the API token.
 
     Raises:
         GiteaError: if Gitea is unreachable, or any request returns an
             unexpected status.
     """
     for filename, content in files.items():
-        _push_one_file(technical_name, filename, content)
+        _push_one_file(technical_name, filename, content, author_username)
 
 
-def _push_one_file(technical_name: str, filename: str, content: str) -> None:
+def _push_one_file(technical_name: str, filename: str, content: str, author_username: str) -> None:
     contents_url = f"{GITEA_URL}/api/v1/repos/{GITEA_USERNAME}/{technical_name}/contents/{filename}"
 
     try:
@@ -157,9 +189,18 @@ def _push_one_file(technical_name: str, filename: str, content: str) -> None:
             f"unexpected status {existing.status_code} checking for '{filename}' in '{technical_name}': {existing.text}"
         )
 
+    # author == committer, deliberately: Gitea has a known historical bug
+    # (go-gitea/gitea#9294, "API: Author/Committer interchanged," fixed by
+    # #9297) where the file-edit/create API swapped these two fields in
+    # the commit actually written to git. Setting both to the identical
+    # Identity makes that swap a no-op regardless of which field Gitea's
+    # contents API actually honors for which git role.
+    identity = {"name": author_username, "email": synthetic_email_for(author_username)}
     body = {
         "message": _COMMIT_MESSAGE,
         "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "author": identity,
+        "committer": identity,
     }
     if existing.status_code == 200:
         body["sha"] = existing.json()["sha"]

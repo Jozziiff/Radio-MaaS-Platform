@@ -775,7 +775,9 @@ async def build_macro(
     analysis = analyze(body.source_code)
     artifacts = generate_artifacts(analysis)
     try:
-        image_tag = await run_in_threadpool(build_and_push, technical_name, body.source_code)
+        image_tag = await run_in_threadpool(
+            build_and_push, technical_name, body.source_code, current_user.username
+        )
     except RuntimeError as exc:
         raise HTTPException(
             status_code=422,

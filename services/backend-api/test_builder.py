@@ -59,7 +59,7 @@ def test_pushes_to_gitea_before_creating_the_kaniko_job():
         mock_batch_api.return_value.create_namespaced_job.side_effect = track_create_job
         mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
 
-        build_and_push("rtwp-anomaly-demo", SOURCE)
+        build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     assert call_order == ["gitea_ensure_repo", "gitea_push_artifacts", "kaniko_job_created"]
 
@@ -73,7 +73,7 @@ def test_a_gitea_push_failure_raises_and_never_creates_a_kaniko_job():
         patch("builder.k8s_client.BatchV1Api") as mock_batch_api,
     ):
         with pytest.raises(RuntimeError, match="[Gg]itea"):
-            build_and_push("rtwp-anomaly-demo", SOURCE)
+            build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     mock_batch_api.return_value.create_namespaced_job.assert_not_called()
 
@@ -86,7 +86,7 @@ def test_pushes_all_five_generated_files_to_gitea():
     ):
         mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
 
-        build_and_push("rtwp-anomaly-demo", SOURCE)
+        build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     mock_push.assert_called_once()
     pushed_files = mock_push.call_args.args[1]
@@ -98,6 +98,7 @@ def test_pushes_all_five_generated_files_to_gitea():
         "wrapper.py",
     }
     assert pushed_files["macro.py"] == SOURCE
+    assert mock_push.call_args.args[2] == "jsmith"
 
 
 def test_creates_a_kaniko_job_pointed_at_the_pushed_gitea_repo():
@@ -108,7 +109,7 @@ def test_creates_a_kaniko_job_pointed_at_the_pushed_gitea_repo():
     ):
         mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
 
-        build_and_push("rtwp-anomaly-demo", SOURCE)
+        build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     created_job = mock_batch_api.return_value.create_namespaced_job.call_args.kwargs["body"]
     container = created_job.spec.template.spec.containers[0]
@@ -132,7 +133,7 @@ def test_kaniko_job_git_context_env_vars_set_for_plain_http_gitea():
     ):
         mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
 
-        build_and_push("rtwp-anomaly-demo", SOURCE)
+        build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     created_job = mock_batch_api.return_value.create_namespaced_job.call_args.kwargs["body"]
     container = created_job.spec.template.spec.containers[0]
@@ -150,7 +151,7 @@ def test_kaniko_job_mounts_the_registry_docker_config_secret():
     ):
         mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
 
-        build_and_push("rtwp-anomaly-demo", SOURCE)
+        build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     created_job = mock_batch_api.return_value.create_namespaced_job.call_args.kwargs["body"]
     pod_spec = created_job.spec.template.spec
@@ -171,7 +172,7 @@ def test_kaniko_job_uses_insecure_push_for_the_plain_http_registry():
     ):
         mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
 
-        build_and_push("rtwp-anomaly-demo", SOURCE)
+        build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     created_job = mock_batch_api.return_value.create_namespaced_job.call_args.kwargs["body"]
     container = created_job.spec.template.spec.containers[0]
@@ -187,7 +188,7 @@ def test_returns_the_registry_qualified_image_tag_on_success():
     ):
         mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
 
-        tag = build_and_push("rtwp-anomaly-demo", SOURCE)
+        tag = build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     assert tag == "registry:5000/rtwp-anomaly-demo:generated"
 
@@ -208,7 +209,7 @@ def test_kaniko_job_failure_raises_runtime_error_with_pod_logs():
         )
 
         with pytest.raises(RuntimeError, match="no such file or directory"):
-            build_and_push("rtwp-anomaly-demo", SOURCE)
+            build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
 
 def test_a_rebuild_deletes_the_stale_job_before_creating_the_new_one():
@@ -235,7 +236,7 @@ def test_a_rebuild_deletes_the_stale_job_before_creating_the_new_one():
         mock_batch_api.return_value.create_namespaced_job.side_effect = track_create
         mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
 
-        build_and_push("rtwp-anomaly-demo", SOURCE)
+        build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     assert call_order == [
         ("delete_namespaced_job", "rtwp-anomaly-demo-build"),
@@ -256,7 +257,7 @@ def test_deleting_a_nonexistent_job_on_first_ever_build_does_not_raise():
         mock_batch_api.return_value.delete_namespaced_job.side_effect = ApiException(status=404)
         mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
 
-        tag = build_and_push("rtwp-anomaly-demo", SOURCE)
+        tag = build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     mock_batch_api.return_value.create_namespaced_job.assert_called_once()
     assert tag == "registry:5000/rtwp-anomaly-demo:generated"
@@ -275,7 +276,7 @@ def test_unexpected_api_exception_on_job_creation_becomes_a_runtime_error():
         mock_batch_api.return_value.create_namespaced_job.side_effect = ApiException(status=409, reason="Conflict")
 
         with pytest.raises(RuntimeError, match="Kaniko Job creation failed"):
-            build_and_push("rtwp-anomaly-demo", SOURCE)
+            build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
 
 def test_writes_the_minio_wrapper_template_into_pushed_gitea_files():
@@ -292,7 +293,7 @@ def test_writes_the_minio_wrapper_template_into_pushed_gitea_files():
     ):
         mock_batch_api.return_value.read_namespaced_job_status.return_value = _succeeded_job()
 
-        build_and_push("rtwp-anomaly-demo", SOURCE)
+        build_and_push("rtwp-anomaly-demo", SOURCE, "jsmith")
 
     pushed_files = mock_push.call_args.args[1]
     assert pushed_files["wrapper.py"] == wrapper_source

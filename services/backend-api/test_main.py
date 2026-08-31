@@ -54,7 +54,9 @@ def build_and_push_succeeds_by_default(monkeypatch):
     main.build_and_push directly, overriding this default.
     """
     monkeypatch.setattr(
-        main, "build_and_push", lambda macro_name, source_code: f"registry:5000/{macro_name}:generated"
+        main,
+        "build_and_push",
+        lambda macro_name, source_code, author_username: f"registry:5000/{macro_name}:generated",
     )
 
 

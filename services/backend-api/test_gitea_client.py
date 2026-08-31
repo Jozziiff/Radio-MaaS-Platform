@@ -7,7 +7,7 @@ import requests
 import responses
 
 import gitea_client
-from gitea_client import GiteaError, ensure_repo, push_artifacts
+from gitea_client import GiteaError, ensure_repo, push_artifacts, synthetic_email_for
 
 GITEA_URL = "http://gitea:3000"
 GITEA_USERNAME = "admin"
@@ -60,7 +60,7 @@ def test_ensure_repo_creates_when_missing():
     import json
 
     body = json.loads(create_call.request.body)
-    assert body == {"name": "new-macro", "private": True, "auto_init": False}
+    assert body == {"name": "new-macro", "private": False, "auto_init": False}
 
 
 @responses.activate
@@ -101,7 +101,7 @@ def test_push_artifacts_creates_a_file_that_does_not_exist_yet():
         status=201,
     )
 
-    push_artifacts("rtwp-anomaly-demo", {"Dockerfile": "FROM python:3.11-slim\n"})
+    push_artifacts("rtwp-anomaly-demo", {"Dockerfile": "FROM python:3.11-slim\n"}, "jsmith")
 
     import json
 
@@ -127,7 +127,7 @@ def test_push_artifacts_updates_a_file_that_already_exists():
         status=200,
     )
 
-    push_artifacts("rtwp-anomaly-demo", {"Dockerfile": "FROM python:3.12-slim\n"})
+    push_artifacts("rtwp-anomaly-demo", {"Dockerfile": "FROM python:3.12-slim\n"}, "jsmith")
 
     import json
 
@@ -161,6 +161,7 @@ def test_push_artifacts_pushes_every_file_given():
             "macro.py": "...",
             "wrapper.py": "...",
         },
+        "jsmith",
     )
 
     assert len(responses.calls) == 10
@@ -175,4 +176,40 @@ def test_push_artifacts_raises_gitea_error_on_unexpected_status():
     )
 
     with pytest.raises(GiteaError):
-        push_artifacts("rtwp-anomaly-demo", {"Dockerfile": "..."})
+        push_artifacts("rtwp-anomaly-demo", {"Dockerfile": "..."}, "jsmith")
+
+
+@responses.activate
+def test_push_artifacts_sets_author_and_committer_to_the_real_employee():
+    """M7: attribution, docs/decisions/013-per-user-accounts.md's Gitea addendum.
+
+    author == committer, deliberately -- see push_artifacts's own
+    docstring for the historical Gitea bug (go-gitea/gitea#9294) this
+    hedges against.
+    """
+    responses.add(
+        responses.GET,
+        f"{GITEA_URL}/api/v1/repos/{GITEA_USERNAME}/rtwp-anomaly-demo/contents/Dockerfile",
+        status=404,
+    )
+    responses.add(
+        responses.PUT,
+        f"{GITEA_URL}/api/v1/repos/{GITEA_USERNAME}/rtwp-anomaly-demo/contents/Dockerfile",
+        json={},
+        status=201,
+    )
+
+    push_artifacts("rtwp-anomaly-demo", {"Dockerfile": "FROM python:3.11-slim\n"}, "jsmith")
+
+    import json
+
+    put_call = responses.calls[1]
+    body = json.loads(put_call.request.body)
+    expected_identity = {"name": "jsmith", "email": "jsmith@radio-maas.local"}
+    assert body["author"] == expected_identity
+    assert body["committer"] == expected_identity
+
+
+def test_synthetic_email_for_is_valid_format_and_non_deliverable():
+    assert synthetic_email_for("jsmith") == "jsmith@radio-maas.local"
+    assert synthetic_email_for("admin") == "admin@radio-maas.local"

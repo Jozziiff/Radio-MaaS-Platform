@@ -2,9 +2,60 @@
 # MINIO_ACCESS_KEY/MINIO_SECRET_KEY) that M3/M4's first pass hardcoded
 # directly into infra/minio.yaml and services/backend-api/*.py.
 #
+# M7 (production hardening): Vault now runs with real raft (integrated
+# storage) persistence instead of -dev mode, and a deliberately
+# simplified single-key (1-of-1 Shamir) auto-unseal mechanism -- see
+# docs/decisions/012-vault-simplified-unseal.md for the full reasoning,
+# including why this project accepts a Kubernetes-Secret-based unseal
+# key (a real, named security simplification, not an oversight: this
+# cluster has no RBAC boundary separating "kubectl access" from "Vault
+# access" today, so multi-party unseal or a cloud-KMS-backed auto-unseal
+# would protect a separation that doesn't functionally exist here yet).
+# HashiCorp's own docs confirm there is no native Kubernetes-Secret seal
+# type -- every documented auto-unseal mechanism needs a cloud KMS, an
+# HSM (Enterprise-only), or a second Vault instance (transit seal, which
+# just relocates this same problem). This project has none of those
+# available, so the sidecar below is a deliberately hand-built pattern,
+# not a HashiCorp feature.
+#
 # Deployment (not a Job) because Vault is a long-lived service that should
 # keep running and be restarted if it crashes -- same reasoning as MinIO's
 # Deployment in infra/minio.yaml, the opposite of a one-shot macro Job.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+data:
+  vault.hcl: |
+    storage "raft" {
+      path    = "/vault/data"
+      node_id = "vault-0"
+    }
+
+    listener "tcp" {
+      address     = "0.0.0.0:8200"
+      tls_disable = true
+    }
+
+    api_addr     = "http://vault:8200"
+    cluster_addr = "http://vault:8201"
+
+    disable_mlock = true
+---
+# PersistentVolumeClaim for Vault's raft data -- same pattern as
+# backend-api-db/minio-data/gitea-data/registry-data. Small: this only
+# ever holds metadata for a handful of small KV secrets, not bulk data.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vault-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,32 +73,84 @@ spec:
       containers:
         - name: vault
           image: hashicorp/vault
-          # -dev mode: Vault starts already unsealed, in memory, with a
-          # fixed root token ("devroot") and no real storage backend --
-          # everything is lost on pod restart. This is exclusively for
-          # local development. It is NOT how Vault would ever run in
-          # production: a real deployment needs a persistent storage
-          # backend, a proper unseal process (Shamir key shares or an
-          # auto-unseal mechanism), and short-lived tokens instead of a
-          # hardcoded root token. Do not carry this manifest's shape
-          # forward into anything resembling production.
           command:
             - vault
             - server
-            - -dev
-            - -dev-listen-address=0.0.0.0:8200
-            - -dev-root-token-id=devroot
+            - -config=/vault/config/vault.hcl
           ports:
             - containerPort: 8200
               name: api
-          securityContext:
-            # Vault -dev mode uses mlock to prevent secrets from being
-            # swapped to disk, which needs IPC_LOCK; the alternative is
-            # disabling mlock entirely, which -dev mode already does
-            # internally, so no special capability grant is added here.
-            capabilities:
-              add:
-                - IPC_LOCK
+          volumeMounts:
+            - name: vault-config
+              mountPath: /vault/config
+              readOnly: true
+            - name: vault-data
+              mountPath: /vault/data
+        - name: vault-unseal
+          # Sidecar, not an init container: `vault operator unseal` is
+          # an API call against the already-running Vault server, so it
+          # must run *alongside* the main container, not before it.
+          # Polls quietly until the vault-unseal-key Secret exists (the
+          # one-time manual `vault operator init` step, documented in
+          # docs/decisions/012-vault-simplified-unseal.md, hasn't
+          # necessarily happened yet on a fresh Vault) then unseals on
+          # every pod start using vault status's own exit code (0 =
+          # unsealed, 1 = error, 2 = sealed -- confirmed via HashiCorp's
+          # CLI docs; no jq in this image, so exit codes are used
+          # instead of parsing `-format=json`). Idles once unsealed
+          # rather than exiting, since a Deployment expects its
+          # containers to keep running.
+          image: hashicorp/vault
+          command:
+            - sh
+            - -c
+            - |
+              export VAULT_ADDR=http://localhost:8200
+              KEY_FILE=/vault/unseal-secret/unseal_key
+              while [ ! -f "$KEY_FILE" ]; do
+                echo "waiting for vault-unseal-key Secret to exist (manual 'vault operator init' not run yet?)"
+                sleep 5
+              done
+              echo "vault-unseal-key found, waiting for vault to be unsealed"
+              while true; do
+                vault status >/dev/null 2>&1
+                code=$?
+                if [ "$code" -eq 0 ]; then
+                  break
+                elif [ "$code" -eq 2 ]; then
+                  vault operator unseal "$(cat "$KEY_FILE")" || true
+                fi
+                sleep 2
+              done
+              echo "vault unsealed, idling"
+              sleep infinity
+          volumeMounts:
+            - name: vault-unseal-key
+              mountPath: /vault/unseal-secret
+              readOnly: true
+      volumes:
+        - name: vault-config
+          configMap:
+            name: vault-config
+        - name: vault-data
+          persistentVolumeClaim:
+            claimName: vault-data
+        - name: vault-unseal-key
+          secret:
+            # Created manually, once, after the first `vault operator
+            # init` -- see docs/decisions/012-vault-simplified-unseal.md.
+            # This Secret doesn't exist until that step happens, which
+            # is exactly why the sidecar polls for it rather than
+            # assuming it's there. Only unseal_key is exposed as a file
+            # here (via `items`) -- the sidecar has no legitimate reason
+            # to read root_token, even though that field lives in the
+            # same Secret (see infra/backend-api.yaml for that
+            # consumer).
+            secretName: vault-unseal-key
+            optional: true
+            items:
+              - key: unseal_key
+                path: unseal_key
 ---
 # ClusterIP: only reachable from inside the cluster, at vault:8200 -- other
 # pods (backend-api, and later the External Secrets Operator) are the

@@ -688,13 +688,19 @@ Frontend changes are currently verified manually against the running app.
   Every secret is lost on pod restart and must be re-seeded (see
   [Getting started, step 4](#4-seed-vaults-secrets--required-on-every-fresh-cluster)).
   See [003-vault-secret-management-simplifications.md](docs/decisions/003-vault-secret-management-simplifications.md).
-- **No persistent storage for most services.** MinIO's, Vault's, Gitea's,
-  and the in-cluster registry's data all live on `emptyDir` volumes (or,
-  for the registry, no volume at all) — wiped on every pod restart, not
-  just cluster recreation. `backend-api` is the first exception: since
-  M7, its `registry.db` is PVC-backed (`infra/backend-api.yaml`) and
-  survives pod restarts — see
-  [009-backend-api-in-cluster-deployment.md](docs/decisions/009-backend-api-in-cluster-deployment.md).
+- **Vault is the one service still on non-persistent storage.** `-dev`
+  mode is in-memory only — see the bullet above. `backend-api`, MinIO,
+  Gitea, and the in-cluster registry are all PVC-backed as of M7 and
+  survive a pod restart — see
+  [009-backend-api-in-cluster-deployment.md](docs/decisions/009-backend-api-in-cluster-deployment.md)
+  and
+  [010-minio-gitea-registry-persistence.md](docs/decisions/010-minio-gitea-registry-persistence.md).
+  **Caveat that applies to all of them, Vault included:** the PVCs use
+  k3d's `local-path` storage class, which stores data on the node
+  container's own filesystem — a full `k3d cluster delete`/`create`
+  (not just a pod restart) still loses everything, since the node itself
+  is gone. See [docs/RUNBOOK.md](docs/RUNBOOK.md)'s "Recover a stranded
+  k3d cluster" for the full re-seeding checklist that requires.
 - **No registry-side image cleanup.** `DELETE /macros/{technical_name}`
   removes a macro's database row and Gitea reference, but does not delete
   its built image from the in-cluster registry — that would need a

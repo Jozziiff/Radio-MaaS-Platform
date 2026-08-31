@@ -393,5 +393,8 @@ multi-step, and currently undocumented as a single runbook (its steps
 are scattered across this doc, README.md, and docs/RUNBOOK.md).
 Reinforces, with a second real data point, that 007's persistence
 priority item is the right thing to tackle next -- see
-[010-persistence-phase-checkpoint.md](010-persistence-phase-checkpoint.md)
-for where that work stands.
+[010-minio-gitea-registry-persistence.md](010-minio-gitea-registry-persistence.md)
+for that work, and
+[011-host-alias-is-not-a-workaround.md](011-host-alias-is-not-a-workaround.md)
+for why the recurrence itself (not just the data loss) needed its own
+investigation.

@@ -43,7 +43,7 @@ from "the macro script itself is wrong" — don't skip ahead.
 
 | Symptom | Likely cause | Fix / check |
 |---|---|---|
-| `k3d cluster list` doesn't show `radio-maas`, or `kubectl` can't connect at all | Cluster doesn't exist yet, or (Windows) a reboot stranded k3d's assigned host port | `k3d cluster create radio-maas`. If it existed before a reboot and now can't be reached: `k3d cluster delete radio-maas && k3d cluster create radio-maas` — safe, everything stored is deliberately ephemeral. See [M4-jwt-auth.md](decisions/M4-jwt-auth.md)'s incident writeup for the full story. |
+| `k3d cluster list` doesn't show `radio-maas`, or `kubectl` can't connect at all | Cluster doesn't exist yet, or (Windows) a reboot stranded k3d's assigned host port | Use the **exact command in [Getting started, step 1](../README.md#1-create-the-cluster)** — `k3d cluster create radio-maas --registry-config infra/registries.yaml --host-alias 10.43.99.99:registry`. Do **not** run a bare `k3d cluster create radio-maas` (missing those two flags silently breaks the registry — see row below on `dial tcp: lookup registry: no such host`). If it existed before and now can't be reached: delete then recreate with the same full command — see "Recover a stranded k3d cluster" below for the full re-seeding checklist this now requires (MinIO/Gitea/the registry are PVC-backed as of [010](decisions/010-minio-gitea-registry-persistence.md), but a full cluster recreate loses that storage too — see that section for why). See [M4-jwt-auth.md](decisions/M4-jwt-auth.md)'s incident writeup for the full story. |
 | `kubectl get nodes` fails with `dial tcp <some IP>:<port>: connectex: ... failed to respond` — **and that IP isn't your machine's current IP at all** | (Windows, after a network/IP change — a Wi-Fi switch, a new router, a VPN toggling) The Windows hosts file (`C:\Windows\System32\drivers\etc\hosts`) has a stale, hardcoded line for `host.docker.internal` pointing at your *old* IP. Docker Desktop normally manages this entry itself and keeps it at `127.0.0.1`, but a hardcoded line silently overrides that and never updates. Deleting/recreating the cluster does **not** fix this — the stale entry breaks every cluster the same way, since it's a hosts-file problem, not a k3d problem. | Open Notepad **as Administrator**, open `C:\Windows\System32\drivers\etc\hosts`, and check for a line like `<some IP> host.docker.internal`. If it's anything other than `127.0.0.1`, fix it: delete the stale line and add `127.0.0.1 host.docker.internal` (and `127.0.0.1 gateway.docker.internal` if that one's stale too). Save, then retry `kubectl get nodes` — no cluster recreate needed. |
 | `kubectl get application radio-maas-infra -n argocd` isn't `Synced`/`Healthy` | ArgoCD hasn't reconciled yet (~3 min default poll interval), or `infra/argocd-app.yaml` was never applied | Wait, or re-apply: `kubectl apply -f infra/argocd-app.yaml -n argocd`. Never `kubectl apply` anything *inside* `infra/` directly — ArgoCD's `selfHeal` will just revert it. |
 | A pod (often Vault, the largest image) sits in `ImagePullBackOff` right after a fresh `kubectl apply`/ArgoCD sync | The image download was interrupted mid-transfer — usually a dropped internet connection. `kubectl describe pod <pod-name>` shows something like `short read: expected N bytes but got M: unexpected EOF`. This is the one point in the whole stack that genuinely needs internet: pulling each infra image (MinIO/Vault/Gitea) the first time it's needed on a given cluster. Once cached locally by Docker, later cluster recreates reuse the cached image and don't need to re-download. | Nothing to fix by hand — reconnect to the internet and wait. Kubernetes retries a failed image pull automatically with its own backoff; no restart or recreate needed. |
@@ -109,15 +109,59 @@ docker run --rm --entrypoint sh minio/mc -c "
 
 **Recover a stranded k3d cluster** (Windows, after a reboot — see
 [M4-jwt-auth.md](decisions/M4-jwt-auth.md) for the real incident this
-came from):
+came from — or after anything else that can silently drop the node's
+`--host-alias` DNS entry, like a Docker Desktop restart; this has now
+happened twice, see
+[009](decisions/009-backend-api-in-cluster-deployment.md)'s "registry-DNS-loss
+recovery recurred" section):
+
 ```bash
 k3d cluster delete radio-maas
-k3d cluster create radio-maas
+k3d cluster create radio-maas \
+  --registry-config infra/registries.yaml \
+  --host-alias 10.43.99.99:registry
 ```
-Safe to do at any time — nothing this project stores is meant to survive
-a restart yet (see [Known limitations](../README.md#known-limitations)).
-You'll need to redeploy `infra/` via ArgoCD, re-seed MinIO and Vault, and
-rebuild any macros you want available again.
+
+**Always use this exact command, both flags together — never a bare
+`k3d cluster create radio-maas`.** Omitting `--registry-config` breaks
+containerd's trust of the in-cluster registry (TLS/x509 errors); omitting
+`--host-alias` breaks the node's ability to resolve the hostname
+`registry` at all (`dial tcp: lookup registry: no such host`) — and,
+unlike the trust config, `--host-alias` can only be set at
+cluster-*creation* time, so getting this flag right the first time
+avoids a second recreate. See [Getting started, step
+1](../README.md#1-create-the-cluster) for the full explanation of why
+each flag exists, and step 4d for what to do if you're not sure whether
+your current cluster already has both.
+
+Recreating the cluster is otherwise safe to do at any time, but it is
+**not free** — and, as of
+[010](decisions/010-minio-gitea-registry-persistence.md)'s PVC work,
+**this is now the one recovery path that still loses everything even
+though MinIO/Gitea/the registry are PVC-backed**: those PVCs use the
+`local-path` storage class, which stores data as a plain directory on
+the node container's own filesystem — deleting the node (what
+`k3d cluster delete` does) deletes that storage along with it. PVCs only
+protect against a *pod* restart, not a full cluster recreate. Every
+one-time seeding step in [Getting
+started](../README.md#getting-started) must be redone from scratch, in
+order:
+
+1. Redeploy `infra/` via ArgoCD (step 2) — wait for `Synced`/`Healthy`.
+2. Re-seed MinIO's two buckets (step 3).
+3. Re-seed Vault's JWT/MinIO secrets (step 4).
+4. Re-seed the registry credential — Vault, `registry-htpasswd`, and
+   `registry-push-secret` together (step 4b).
+5. Re-create Gitea's admin account + API token through its web UI, then
+   seed the new token into Vault's `secret/gitea` (steps 4c/5) —
+   Gitea's own storage doesn't survive a cluster recreate any more than
+   MinIO's does.
+6. Restart `backend-api` (`kubectl delete pod -l app=backend-api`) so it
+   picks up the new Gitea token instead of holding the old one from its
+   last startup read.
+7. Rebuild any macros you want available again — their images lived only
+   in the old cluster's registry, and their Gitea-mirrored repos only in
+   the old Gitea instance.
 
 ## When it's not the infrastructure
 

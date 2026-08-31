@@ -1,4 +1,4 @@
-# 011 — Persistent storage for MinIO, Gitea, and the registry
+# 010 — Persistent storage for MinIO, Gitea, and the registry
 
 ## What changed
 
@@ -26,8 +26,9 @@ matching `backend-api-db`'s own pattern from
 
 Vault is deliberately excluded from this task -- its fix needs a real
 seal/unseal strategy decided first (Shamir shares by hand vs. an
-auto-unseal mechanism), not just a PVC; see
-[010](010-persistence-phase-checkpoint.md) for that open question.
+auto-unseal mechanism), not just a PVC. That decision is still open as
+of this doc and needs its own deliberate brainstorm-then-decide pass
+before Vault's dev-mode exit starts, not an ad-hoc choice made mid-task.
 
 Sizes are conservative estimates, not measured from real usage (no
 metrics exist yet, same caveat as `009`'s resource limits): 5Gi for

@@ -6,7 +6,7 @@
 // rest of the app can catch in one place, rather than every call site
 // checking response.status itself.
 
-const API_BASE_URL = "http://localhost:8000";
+const API_BASE_URL = "";
 
 export class UnauthorizedError extends Error {
   constructor() {

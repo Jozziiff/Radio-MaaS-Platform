@@ -1,5 +1,12 @@
 # 003 — Vault Secret-Management Simplifications
 
+**Update (M7):** the `devroot`/dev-mode-only state this doc describes no
+longer applies — see
+[012-vault-simplified-unseal.md](012-vault-simplified-unseal.md) for the
+current setup (a real generated root token, raft persistence, and the
+same root-token-as-standing-credential simplification restated for that
+real setup).
+
 ## What this is about
 
 M4 wires `services/backend-api/` to fetch its JWT signing key and MinIO

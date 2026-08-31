@@ -60,10 +60,11 @@ roleRef:
 ---
 # PersistentVolumeClaim for registry.db -- persistent from the very first
 # deploy, never shipped on emptyDir even temporarily (unlike
-# MinIO/Vault/Gitea/the registry today, all still emptyDir -- see
-# docs/decisions/007's persistence item; this is the first of the four+one
-# services to actually get real persistence, precisely because there was
-# no reason to defer it just for this one).
+# MinIO/Vault/Gitea/the registry, which started out emptyDir/unpersisted
+# and were later given their own PVCs -- see docs/decisions/007's
+# persistence item, 010, and 012; this was the first of the services to
+# actually get real persistence, precisely because there was no reason to
+# defer it just for this one).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

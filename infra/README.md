@@ -8,10 +8,16 @@ Infrastructure configuration for the platform: k3d cluster setup and Kubernetes 
   its `spec.source.directory.exclude` is set to `registries.yaml` — see
   that file's own entry below for why.
 - `minio.yaml` — MinIO Deployment + Service (M3), currently in active use.
-- `vault.yaml` — HashiCorp Vault Deployment + Service (M4), running in
-  `-dev` mode with a static root token (see
-  [003-vault-secret-management-simplifications.md](../docs/decisions/003-vault-secret-management-simplifications.md)).
-  Backs the JWT signing key and MinIO/registry/Gitea credentials.
+- `vault.yaml` — HashiCorp Vault Deployment + Service (M4). Backs the JWT
+  signing key and MinIO/registry/Gitea credentials. As of M7, it's no
+  longer `-dev` mode: a `vault-config` ConfigMap holds its raft HCL
+  config, a `vault-data` PVC gives it real persistent storage, and a
+  `vault-unseal` sidecar container auto-unseals it on every restart by
+  reading a one-time-generated key from a Secret (see
+  [012-vault-simplified-unseal.md](../docs/decisions/012-vault-simplified-unseal.md),
+  which also documents the root-token-as-standing-credential
+  simplification originally described in
+  [003](../docs/decisions/003-vault-secret-management-simplifications.md)).
 - `gitea.yaml` — Gitea Deployment + Service (M5), used since M6 as a
   per-macro artifact mirror for version history/visibility (see
   [005-gitea-artifact-mirror.md](../docs/decisions/005-gitea-artifact-mirror.md))
@@ -36,8 +42,11 @@ Infrastructure configuration for the platform: k3d cluster setup and Kubernetes 
   creates and polls), a PersistentVolumeClaim, a Deployment, and a
   Service — six resources in total. **Non-obvious:** the PVC is the
   first real persistent storage in this project — `registry.db` survives
-  pod restarts, unlike MinIO/Vault/Gitea/the registry above, which are
-  all still `emptyDir` or unpersisted. **Non-obvious:** the Role grants
+  pod restarts. MinIO/Gitea/the registry above were later given their
+  own PVCs too (see [010](../docs/decisions/010-minio-gitea-registry-persistence.md)),
+  and Vault followed with raft persistence of its own (see
+  [012](../docs/decisions/012-vault-simplified-unseal.md)) — none of the
+  four are still `emptyDir`/unpersisted as of M7. **Non-obvious:** the Role grants
   `jobs/status` and `pods/log` as their own explicit resource entries
   alongside `jobs` and `pods` — Kubernetes subresources aren't implicitly
   covered by a grant on their parent resource, so a bare `jobs`/`pods`

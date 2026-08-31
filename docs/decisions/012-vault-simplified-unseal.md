@@ -197,6 +197,34 @@ that lost its PVC):
 (`kubectl delete pod -l app=backend-api`) after re-seeding if it was
 already running.
 
+## Gotcha: rotating `root_token` needs a `backend-api` pod restart, `unseal_key` doesn't
+
+These two fields of the same `vault-unseal-key` Secret resync
+differently, because they're consumed differently:
+
+- The sidecar reads `unseal_key` via a **volume mount** (see the
+  `vault-unseal-key` volume in `infra/vault.yaml` above). Kubernetes
+  keeps volume-mounted Secret data in sync with the underlying Secret on
+  its own, within its normal sync interval (the ~60-second delay already
+  observed and documented above) — no pod restart needed for the
+  sidecar to see a changed `unseal_key`.
+- `backend-api` reads `root_token` via a plain **env-var** `secretKeyRef`
+  (`infra/backend-api.yaml`'s `VAULT_TOKEN`, see above). Env-var-sourced
+  Secret values are read once, at pod creation, and do **not** hot-reload
+  when the underlying Secret changes later — Kubernetes has no mechanism
+  to push an updated env var into an already-running container.
+
+As a general rule, not just a one-off fact about this token: **Secrets
+consumed as env vars need a pod restart to pick up a change; Secrets
+consumed as volume mounts resync on their own.** Concretely, if
+`vault-unseal-key`'s `root_token` field is ever rotated (a new `vault
+operator init`, or an admin issuing a new root token by hand), the
+running `backend-api` pod keeps using its old, stale token until it's
+explicitly restarted (`kubectl delete pod -l app=backend-api`) — it will
+not pick up the new value on its own, and Vault calls will start failing
+with an auth error only once the old token is revoked or expires,
+which can make the cause non-obvious if the restart step is missed.
+
 ## What needed correcting from the original plan
 
 Task 3 changed code baked into `backend-api`'s container image (the

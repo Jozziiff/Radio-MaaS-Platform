@@ -43,7 +43,7 @@ from "the macro script itself is wrong" — don't skip ahead.
 
 | Symptom | Likely cause | Fix / check |
 |---|---|---|
-| `k3d cluster list` doesn't show `radio-maas`, or `kubectl` can't connect at all | Cluster doesn't exist yet, or (Windows) a reboot stranded k3d's assigned host port | Use the **exact command in [Getting started, step 1](../README.md#1-create-the-cluster)** — `k3d cluster create radio-maas --registry-config infra/registries.yaml --host-alias 10.43.99.99:registry`. Do **not** run a bare `k3d cluster create radio-maas` (missing those two flags silently breaks the registry — see row below on `dial tcp: lookup registry: no such host`). If it existed before and now can't be reached: delete then recreate with the same full command — see "Recover a stranded k3d cluster" below for the full re-seeding checklist this now requires (MinIO/Gitea/the registry are PVC-backed as of [010](decisions/010-minio-gitea-registry-persistence.md), but a full cluster recreate loses that storage too — see that section for why). See [M4-jwt-auth.md](decisions/M4-jwt-auth.md)'s incident writeup for the full story. |
+| `k3d cluster list` doesn't show `radio-maas`, or `kubectl` can't connect at all | Cluster doesn't exist yet, or (Windows) a reboot stranded k3d's assigned host port | Use the **exact command in [Getting started, step 1](../README.md#1-create-the-cluster)** — `k3d cluster create radio-maas --registry-config infra/registries.yaml --host-alias 10.43.99.99:registry -p "80:80@loadbalancer" -p "443:443@loadbalancer"`. Do **not** run a bare `k3d cluster create radio-maas` (missing those two flags silently breaks the registry — see row below on `dial tcp: lookup registry: no such host`). If it existed before and now can't be reached: delete then recreate with the same full command — see "Recover a stranded k3d cluster" below for the full re-seeding checklist this now requires (MinIO/Gitea/the registry are PVC-backed as of [010](decisions/010-minio-gitea-registry-persistence.md), but a full cluster recreate loses that storage too — see that section for why). See [M4-jwt-auth.md](decisions/M4-jwt-auth.md)'s incident writeup for the full story. |
 | `kubectl get nodes` fails with `dial tcp <some IP>:<port>: connectex: ... failed to respond` — **and that IP isn't your machine's current IP at all** | (Windows, after a network/IP change — a Wi-Fi switch, a new router, a VPN toggling) The Windows hosts file (`C:\Windows\System32\drivers\etc\hosts`) has a stale, hardcoded line for `host.docker.internal` pointing at your *old* IP. Docker Desktop normally manages this entry itself and keeps it at `127.0.0.1`, but a hardcoded line silently overrides that and never updates. Deleting/recreating the cluster does **not** fix this — the stale entry breaks every cluster the same way, since it's a hosts-file problem, not a k3d problem. | Open Notepad **as Administrator**, open `C:\Windows\System32\drivers\etc\hosts`, and check for a line like `<some IP> host.docker.internal`. If it's anything other than `127.0.0.1`, fix it: delete the stale line and add `127.0.0.1 host.docker.internal` (and `127.0.0.1 gateway.docker.internal` if that one's stale too). Save, then retry `kubectl get nodes` — no cluster recreate needed. |
 | `kubectl get application radio-maas-infra -n argocd` isn't `Synced`/`Healthy` | ArgoCD hasn't reconciled yet (~3 min default poll interval), or `infra/argocd-app.yaml` was never applied | Wait, or re-apply: `kubectl apply -f infra/argocd-app.yaml -n argocd`. Never `kubectl apply` anything *inside* `infra/` directly — ArgoCD's `selfHeal` will just revert it. |
 | A pod (often Vault, the largest image) sits in `ImagePullBackOff` right after a fresh `kubectl apply`/ArgoCD sync | The image download was interrupted mid-transfer — usually a dropped internet connection. `kubectl describe pod <pod-name>` shows something like `short read: expected N bytes but got M: unexpected EOF`. This is the one point in the whole stack that genuinely needs internet: pulling each infra image (MinIO/Vault/Gitea) the first time it's needed on a given cluster. Once cached locally by Docker, later cluster recreates reuse the cached image and don't need to re-download. | Nothing to fix by hand — reconnect to the internet and wait. Kubernetes retries a failed image pull automatically with its own backoff; no restart or recreate needed. |
@@ -132,7 +132,9 @@ it's not this):
 k3d cluster delete radio-maas
 k3d cluster create radio-maas \
   --registry-config infra/registries.yaml \
-  --host-alias 10.43.99.99:registry
+  --host-alias 10.43.99.99:registry \
+  -p "80:80@loadbalancer" \
+  -p "443:443@loadbalancer"
 ```
 
 **Always use this exact command, both flags together — never a bare
@@ -199,3 +201,6 @@ macro script or the input data, not the platform:
 - **CSV encoding or parsing errors** → these surface as a Python
   traceback in `kubectl logs -l job-name=<job_name>`, from the macro
   itself, not from the wrapper or MinIO.
+
+
+

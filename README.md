@@ -113,12 +113,14 @@ version of it.
 
 ### 1. Create the cluster
 
-For a **brand-new** cluster, pass two flags together:
+For a **brand-new** cluster, pass four flags together:
 
 ```bash
 k3d cluster create radio-maas \
   --registry-config infra/registries.yaml \
-  --host-alias 10.43.99.99:registry
+  --host-alias 10.43.99.99:registry \
+  -p "80:80@loadbalancer" \
+  -p "443:443@loadbalancer"
 ```
 
 - `--registry-config infra/registries.yaml` makes containerd trust the
@@ -145,6 +147,17 @@ k3d cluster create radio-maas \
   support it either). If you have an existing cluster without this flag,
   see "Applying registry DNS + trust config to an existing cluster"
   below.
+- `-p "80:80@loadbalancer"` and `-p "443:443@loadbalancer"` publish
+  Traefik's `LoadBalancer` Service ports (HTTP and HTTPS from Task 4's
+  Ingress) to the host machine. By default, k3d ships a built-in Traefik
+  instance but doesn't publish its ports to the host — only the cluster's
+  own containers can reach it. These flags expose it, making the `Ingress`
+  reachable from your own machine's browser and from colleagues on the
+  local network. Like `--host-alias`, these are creation-time-only Docker
+  port-publish constraints (see
+  [014](docs/decisions/014-registry-dns-durable-fix.md) for the same class
+  of limitation) and cannot be added retroactively to an already-running
+  cluster.
 
 If you already have an **existing** cluster without `infra/registries.yaml`
 applied yet, see "Applying `infra/registries.yaml` to an existing cluster"
@@ -778,3 +791,5 @@ Frontend changes are currently verified manually against the running app.
 ## License
 
 [Apache License 2.0](LICENSE).
+
+

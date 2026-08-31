@@ -111,6 +111,20 @@ spec:
               # note). This is an account name, not a secret, so it
               # stays a plain value here rather than a secretKeyRef.
               value: "macros"
+            - name: VAULT_TOKEN
+              # Vault's real root token from its one-time `vault
+              # operator init` (see
+              # docs/decisions/012-vault-simplified-unseal.md) --
+              # sourced from the same Secret the Vault pod's own
+              # unseal sidecar reads its unseal key from
+              # (infra/vault.yaml). Using the root token as
+              # backend-api's own standing credential, rather than a
+              # scoped policy/token, is a second named simplification
+              # in that same doc -- not an oversight.
+              valueFrom:
+                secretKeyRef:
+                  name: vault-unseal-key
+                  key: root_token
           volumeMounts:
             - name: registry-db
               mountPath: /app/data

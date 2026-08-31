@@ -66,3 +66,14 @@ CLAUDE.md
 /docs/brief
 
 UNDERSTANDING.md
+
+# M7: services/backend-api/static/ holds the built frontend (dist/)
+# inside the collapsed frontend+backend image (see the root Dockerfile,
+# Task 3). Locally it holds only a placeholder index.html so main.py can
+# be imported without a real `npm run build` -- keep the assets/
+# directory itself (via .gitkeep) so StaticFiles' mount doesn't fail at
+# import time, but never commit the placeholder or a locally-built copy.
+services/backend-api/static/*
+!services/backend-api/static/assets/
+services/backend-api/static/assets/*
+!services/backend-api/static/assets/.gitkeep

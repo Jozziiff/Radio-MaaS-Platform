@@ -111,6 +111,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import db
 import gitea_client
@@ -130,8 +131,8 @@ from auth import (
 from builder import build_and_push
 from db import InvalidIconError
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from minio import Minio
@@ -150,6 +151,12 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 JOB_NAMESPACE = "default"
+
+# M7: the collapsed frontend+backend image (see the root Dockerfile) puts
+# the built React app's dist/ output at this fixed path inside the
+# container. Resolved relative to this file, not the process's cwd, so it
+# works the same whether uvicorn is launched from /app or anywhere else.
+STATIC_DIR = Path(__file__).parent / "static"
 
 # Non-secret MinIO config -- endpoint address and bucket names aren't
 # credentials, so they stay as plain constants rather than going through
@@ -254,26 +261,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="radio-maas-platform backend-api", lifespan=lifespan)
-
-# CORS: scoped to the Vite dev server's origin only (http://localhost:5173,
-# Vite's default port) -- this is a development convenience, not a real
-# deployment's answer. A real deployment would restrict this to whatever
-# origin the frontend is actually served from, not a wildcard and not a
-# hardcoded localhost port. allow_headers includes Authorization explicitly
-# since that's what carries the JWT on every protected request; allow_methods
-# covers GET/POST/PUT/DELETE (JSON bodies and multipart file uploads both
-# need POST, DELETE /macros/{technical_name} needs DELETE, PUT
-# /users/{id} needs PUT -- each one was added here only once a real
-# frontend caller needed it, since a missing method here fails silently at
-# the browser's OPTIONS preflight, surfacing as an opaque "failed to
-# fetch" rather than a clear error).
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
-)
 
 
 @app.get("/health")
@@ -965,3 +952,42 @@ def get_execution_result(job_name: str) -> StreamingResponse:
         raise
 
     return StreamingResponse(response.stream(32 * 1024), media_type="text/csv")
+
+
+def _register_static_routes(static_dir: Path) -> None:
+    """Mount the built frontend's assets and register the SPA catch-all.
+
+    Split into its own function (not inlined at module scope) so tests
+    can re-run registration against a throwaway dist/ directory without
+    re-importing the whole module (which would re-run every Vault/DB
+    side effect main.py's own imports and lifespan trigger). Called once
+    for real at module import time, immediately after this definition.
+
+    Registered here -- textually last in the file -- so every API route
+    above it is already registered on `app.router.routes` first.
+    Starlette matches routes in registration order, first match wins:
+    confirmed empirically (see the design spec) that this means every
+    real route above keeps winning for its own exact path, and this
+    catch-all only ever sees requests that matched nothing else.
+    """
+    app.router.routes = [
+        route
+        for route in app.router.routes
+        if getattr(route, "path", None) not in ("/assets", "/{full_path:path}")
+        and getattr(route, "name", None) not in ("assets",)
+    ]
+
+    app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str) -> FileResponse:
+        """Serve the SPA shell for any path that matched no API route or
+        static asset above -- e.g. a colleague refreshing on /history or
+        /admin. Confirmed empirically this returns 200 with index.html's
+        content, not a 404, for arbitrarily unmatched/nested paths (see
+        the design spec's SPA fallback section).
+        """
+        return FileResponse(static_dir / "index.html")
+
+
+_register_static_routes(STATIC_DIR)

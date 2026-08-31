@@ -6,6 +6,12 @@
 // rest of the app can catch in one place, rather than every call site
 // checking response.status itself.
 
+// M7: same-origin now -- the collapsed backend-api image serves both the
+// API and this app's own static files, so every request is relative to
+// wherever the page itself was loaded from. Local dev (`npm run dev`)
+// stays on two ports (Vite :5173, backend-api :8000), but vite.config.js's
+// `server.proxy` makes that same-origin from the browser's perspective
+// too, so this file needs no dev-vs-prod branch.
 const API_BASE_URL = "";
 
 export class UnauthorizedError extends Error {

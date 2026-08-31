@@ -1,15 +1,22 @@
-// Sidebar (M6, design pass): replaces Nav.jsx's horizontal header bar with
-// a persistent left rail -- wordmark/logo at top, Catalog/History nav
-// items with lucide icons, username + sign-out pinned to the bottom via
-// mt-auto. This is the one shared shell every page now renders inside,
-// instead of each page (or the old shared Nav) owning its own header.
+// Sidebar (M6, design pass; M7 admin nav): replaces Nav.jsx's horizontal
+// header bar with a persistent left rail -- wordmark/logo at top,
+// Catalog/History/(Admin) nav items with lucide icons, username +
+// sign-out pinned to the bottom via mt-auto. This is the one shared shell
+// every page now renders inside, instead of each page (or the old shared
+// Nav) owning its own header.
 //
 // The Gitea instance link moved here from Nav's top-bar-right slot: it's
 // navigation-shaped (an external link out of the app), not a page action,
 // so it belongs alongside Catalog/History rather than floating in a
 // per-page top bar.
+//
+// M7: the Admin link only renders for an admin session -- an employee
+// account never sees it exists, not just a link that 403s if clicked (see
+// docs/decisions/013-per-user-accounts.md). App.jsx's Routes additionally
+// guards the page itself, since hiding this link alone wouldn't stop
+// someone from reaching page === "admin" through stale state.
 
-import { LayoutGrid, History, Map, LogOut, Radio } from "lucide-react";
+import { LayoutGrid, History, Map, ShieldCheck, LogOut, Radio } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 
 export default function Sidebar({ page, onNavigate, giteaLink, className = "" }) {
@@ -48,6 +55,14 @@ export default function Sidebar({ page, onNavigate, giteaLink, className = "" })
           active={page === "map"}
           onClick={() => onNavigate("map")}
         />
+        {session.role === "admin" && (
+          <SidebarLink
+            icon={ShieldCheck}
+            label="Admin"
+            active={page === "admin"}
+            onClick={() => onNavigate("admin")}
+          />
+        )}
       </nav>
 
       {giteaLink && <div className="mt-4 px-2">{giteaLink}</div>}

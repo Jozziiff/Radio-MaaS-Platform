@@ -103,6 +103,8 @@ def init_db() -> None:
         existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(macros)")}
         if "gitea_repo_url" not in existing_columns:
             conn.execute("ALTER TABLE macros ADD COLUMN gitea_repo_url TEXT")
+        if "created_by" not in existing_columns:
+            conn.execute("ALTER TABLE macros ADD COLUMN created_by TEXT")
 
         conn.execute(
             """
@@ -115,6 +117,11 @@ def init_db() -> None:
             )
             """
         )
+        existing_execution_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(executions)")
+        }
+        if "run_by" not in existing_execution_columns:
+            conn.execute("ALTER TABLE executions ADD COLUMN run_by TEXT")
 
         conn.execute(
             """
@@ -138,6 +145,7 @@ def upsert_macro(
     image_tag: str,
     built_at: str,
     updated_at: str,
+    created_by: str | None = None,
 ) -> None:
     """Insert a new macro, or overwrite every field if technical_name already exists.
 
@@ -145,6 +153,13 @@ def upsert_macro(
     (same technical_name, presumably different source_code) simply replaces
     the row rather than needing separate insert/update code paths. Also
     what a future "edit" endpoint will reuse.
+
+    created_by (M7: attribution, docs/decisions/013-per-user-accounts.md)
+    is overwritten on every rebuild too, deliberately -- it reflects "who
+    built the current version," matching the catalog's "built/last
+    modified by" byline, not "who created this technical_name first."
+    None for a macro built before this column existed, or by code that
+    doesn't have a caller's identity to pass.
 
     Raises:
         InvalidIconError: if icon isn't one of VALID_ICONS. Checked here
@@ -161,8 +176,8 @@ def upsert_macro(
             """
             INSERT INTO macros
                 (technical_name, display_name, description, icon, source_code,
-                 image_tag, built_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 image_tag, built_at, updated_at, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(technical_name) DO UPDATE SET
                 display_name = excluded.display_name,
                 description = excluded.description,
@@ -170,7 +185,8 @@ def upsert_macro(
                 source_code = excluded.source_code,
                 image_tag = excluded.image_tag,
                 built_at = excluded.built_at,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                created_by = excluded.created_by
             """,
             (
                 technical_name,
@@ -181,6 +197,7 @@ def upsert_macro(
                 image_tag,
                 built_at,
                 updated_at,
+                created_by,
             ),
         )
 
@@ -215,17 +232,23 @@ def update_gitea_url(technical_name: str, gitea_repo_url: str) -> None:
         )
 
 
-def insert_execution(job_name: str, macro_name: str, status: str, created_at: str) -> None:
+def insert_execution(
+    job_name: str, macro_name: str, status: str, created_at: str, run_by: str | None = None
+) -> None:
     """Record a newly created execution. finished_at starts NULL -- an
     execution isn't terminal yet the moment its Job is created.
+
+    run_by (M7: attribution, docs/decisions/013-per-user-accounts.md) is
+    the username that triggered this run, or None for code paths without
+    a caller identity to pass.
     """
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO executions (job_name, macro_name, status, created_at, finished_at)
-            VALUES (?, ?, ?, ?, NULL)
+            INSERT INTO executions (job_name, macro_name, status, created_at, finished_at, run_by)
+            VALUES (?, ?, ?, ?, NULL, ?)
             """,
-            (job_name, macro_name, status, created_at),
+            (job_name, macro_name, status, created_at, run_by),
         )
 
 

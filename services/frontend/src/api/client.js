@@ -90,13 +90,31 @@ async function request(
   return response;
 }
 
+// Decodes a JWT's payload without verifying its signature -- reading
+// claims client-side is fine because the backend is the actual authority
+// on validity (every protected request re-verifies the token there); the
+// frontend only ever uses these claims for UI decisions (show/hide the
+// Admin nav item, guard the admin page), never as an access-control
+// mechanism itself.
+function decodeJwtPayload(token) {
+  const payloadSegment = token.split(".")[1];
+  const base64 = payloadSegment.replace(/-/g, "+").replace(/_/g, "/");
+  return JSON.parse(atob(base64));
+}
+
+// M7: decodes user_id/role out of the JWT alongside the existing
+// username, so AuthContext can store them once in session -- see
+// docs/decisions/013-per-user-accounts.md for the payload shape
+// ({sub, user_id, role, exp}).
 export async function login(username, password) {
   const response = await request("/auth/login", {
     method: "POST",
     body: { username, password },
     treatUnauthorizedAsSessionExpiry: false,
   });
-  return response.json();
+  const body = await response.json();
+  const payload = decodeJwtPayload(body.access_token);
+  return { ...body, userId: payload.user_id, role: payload.role };
 }
 
 // First protected call wired up, ahead of the catalog screen itself: proves
@@ -245,4 +263,42 @@ export async function listExecutions(token) {
 export async function downloadResult(token, jobName) {
   const response = await request(`/executions/${encodeURIComponent(jobName)}/result`, { token });
   return response.blob();
+}
+
+// User management (M7, admin-only endpoints -- see
+// docs/decisions/013-per-user-accounts.md). All four go through
+// request()'s shared 401 handling; POST/PUT's caller-mistake status codes
+// (409 duplicate username, 422 invalid role, 400 last-admin guard) carry a
+// plain-string `detail`, so the generic error path's Error(detail?.detail)
+// already renders correctly -- no dedicated error class needed here, unlike
+// buildMacro/uploadInput's structured-detail cases.
+export async function listUsers(token) {
+  const response = await request("/users", { token });
+  return response.json();
+}
+
+export async function createUser(token, { username, password, role }) {
+  const response = await request("/users", {
+    method: "POST",
+    token,
+    body: { username, password, role },
+  });
+  return response.json();
+}
+
+export async function updateUser(token, userId, { role, password }) {
+  const response = await request(`/users/${encodeURIComponent(userId)}`, {
+    method: "PUT",
+    token,
+    body: { role, password },
+  });
+  return response.json();
+}
+
+export async function deleteUser(token, userId) {
+  const response = await request(`/users/${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+    token,
+  });
+  return response.json();
 }

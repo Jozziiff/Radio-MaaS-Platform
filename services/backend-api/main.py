@@ -119,6 +119,7 @@ from artifact_generator import generate_artifacts
 from auth import (
     ADMIN_PASSWORD_HASH,
     ADMIN_USERNAME,
+    CurrentUser,
     create_token,
     get_current_user,
     hash_password,
@@ -260,15 +261,17 @@ app = FastAPI(title="radio-maas-platform backend-api", lifespan=lifespan)
 # origin the frontend is actually served from, not a wildcard and not a
 # hardcoded localhost port. allow_headers includes Authorization explicitly
 # since that's what carries the JWT on every protected request; allow_methods
-# covers GET/POST/DELETE (JSON bodies and multipart file uploads both need
-# POST, DELETE /macros/{technical_name} needs DELETE -- its browser
-# preflight (OPTIONS) was failing with a CORS error, surfacing to the
-# frontend as an opaque "failed to fetch", until DELETE was added here).
+# covers GET/POST/PUT/DELETE (JSON bodies and multipart file uploads both
+# need POST, DELETE /macros/{technical_name} needs DELETE, PUT
+# /users/{id} needs PUT -- each one was added here only once a real
+# frontend caller needed it, since a missing method here fails silently at
+# the browser's OPTIONS preflight, surfacing as an opaque "failed to
+# fetch" rather than a clear error).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -335,6 +338,7 @@ class ExecutionRecord(BaseModel):
     status: str
     created_at: str
     finished_at: str | None
+    run_by: str | None = None
 
 
 class MacroAnalysis(BaseModel):
@@ -429,6 +433,7 @@ class BuiltMacro(BaseModel):
     built_at: str
     updated_at: str
     gitea_repo_url: str | None = None
+    created_by: str | None = None
 
 
 class MacroDetail(BuiltMacro):
@@ -640,9 +645,10 @@ def delete_user(user_id: int) -> UserDeleted:
 @app.post(
     "/executions/{macro_name}",
     response_model=ExecutionCreated,
-    dependencies=[Depends(get_current_user)],
 )
-def create_execution(macro_name: str) -> ExecutionCreated:
+def create_execution(
+    macro_name: str, current_user: CurrentUser = Depends(get_current_user)
+) -> ExecutionCreated:
     """Create a new Job run of an already-built macro, with a unique job name.
 
     404s if macro_name isn't in the registry, instead of silently trying
@@ -674,6 +680,7 @@ def create_execution(macro_name: str) -> ExecutionCreated:
         macro_name=macro_name,
         status="pending",
         created_at=datetime.now(timezone.utc).isoformat(),
+        run_by=current_user.username,
     )
 
     return ExecutionCreated(job_name=job_name)
@@ -741,9 +748,10 @@ async def analyze_macro(request: Request) -> MacroAnalysis:
 @app.post(
     "/macros/{technical_name}/build",
     response_model=MacroBuilt,
-    dependencies=[Depends(get_current_user)],
 )
-async def build_macro(technical_name: str, body: BuildMacroRequest) -> MacroBuilt:
+async def build_macro(
+    technical_name: str, body: BuildMacroRequest, current_user: CurrentUser = Depends(get_current_user)
+) -> MacroBuilt:
     """Analyze, push to Gitea, build via Kaniko, and UPSERT into the registry.
 
     UPSERT (see db.upsert_macro) rather than insert-only: rebuilding an
@@ -785,6 +793,7 @@ async def build_macro(technical_name: str, body: BuildMacroRequest) -> MacroBuil
             image_tag=image_tag,
             built_at=now,
             updated_at=now,
+            created_by=current_user.username,
         )
     except InvalidIconError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

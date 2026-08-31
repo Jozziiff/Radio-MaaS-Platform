@@ -155,6 +155,7 @@ function ExecutionRow({ execution, token, callProtected }) {
       <td className="px-4 py-3">
         <p className="font-medium text-signal-100">{execution.macro_name}</p>
         <p className="font-mono text-xs text-signal-400">{execution.job_name}</p>
+        {execution.run_by && <p className="mt-0.5 text-xs text-signal-400">by {execution.run_by}</p>}
       </td>
       <td className="px-4 py-3">
         <Badge status={execution.status} />

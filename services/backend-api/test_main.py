@@ -250,6 +250,7 @@ def test_list_macros_includes_a_macro_recorded_in_the_registry():
             "built_at": "2026-08-09T12:00:00+00:00",
             "updated_at": "2026-08-09T12:00:00+00:00",
             "gitea_repo_url": None,
+            "created_by": None,
         }
     ]
 
@@ -525,6 +526,55 @@ def test_create_execution_records_a_pending_row_in_the_executions_table():
     assert row["macro_name"] == "rtwp-anomaly-demo"
     assert row["status"] == "pending"
     assert row["finished_at"] is None
+
+
+def test_build_macro_records_the_builder_as_created_by():
+    """M7: attribution (docs/decisions/013-per-user-accounts.md)."""
+    with (
+        patch("main.build_and_push", return_value="rtwp-anomaly-demo:generated"),
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("employee1", user_id=7, role="employee")
+        build_response = client.post(
+            "/macros/rtwp-anomaly-demo/build",
+            json={
+                "display_name": "RTWP Anomaly Detector",
+                "description": "Flags cells with high uplink noise.",
+                "icon": "signal",
+                "source_code": "import pandas as pd\n",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        list_response = client.get("/macros", headers={"Authorization": f"Bearer {token}"})
+
+    assert build_response.status_code == 200
+    assert list_response.json()[0]["created_by"] == "employee1"
+
+
+def test_create_execution_records_the_triggering_user_as_run_by():
+    """M7: attribution (docs/decisions/013-per-user-accounts.md)."""
+    _upsert_macro()
+
+    with (
+        patch("main.k8s_client.BatchV1Api"),
+        TestClient(app) as client,
+    ):
+        from auth import create_token
+
+        token = create_token("employee1", user_id=7, role="employee")
+        response = client.post(
+            "/executions/rtwp-anomaly-demo", headers={"Authorization": f"Bearer {token}"}
+        )
+        job_name = response.json()["job_name"]
+
+        list_response = client.get("/executions", headers={"Authorization": f"Bearer {token}"})
+
+    row = db.get_execution(job_name)
+    assert row["run_by"] == "employee1"
+    listed = next(e for e in list_response.json() if e["job_name"] == job_name)
+    assert listed["run_by"] == "employee1"
 
 
 def test_get_execution_status_updates_the_row_to_succeeded():

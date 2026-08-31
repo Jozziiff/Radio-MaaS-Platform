@@ -369,7 +369,10 @@ function MacroCard({ macro, onEdit, onRun, onDelete }) {
       {macro.description && <p className="mt-3 text-xs text-signal-400">{macro.description}</p>}
       <p className="mt-3 font-mono text-xs text-signal-400">{macro.image_tag}</p>
       <div className="mt-3 flex items-center justify-between gap-2">
-        <p className="text-xs text-signal-400">Built {formatBuiltAt(macro.built_at)}</p>
+        <p className="text-xs text-signal-400">
+          Built {formatBuiltAt(macro.built_at)}
+          {macro.created_by && <> &middot; by {macro.created_by}</>}
+        </p>
         <div className="flex shrink-0 items-center gap-2">
           <GiteaRepoLink url={macro.gitea_repo_url} />
           <Button variant="chip" size="sm" onClick={() => onRun(macro.technical_name)}>

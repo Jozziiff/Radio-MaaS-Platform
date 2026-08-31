@@ -327,21 +327,26 @@ here only to keep it next to the other one-time Vault-seeding steps.)
 ### 4d. Applying `infra/registries.yaml` to an existing cluster
 
 Two *separate* problems can prevent Kaniko/execution Jobs from reaching
-the registry — don't conflate them, they need different fixes:
-
+the registry — don't conflate them, but as of
+[014](docs/decisions/014-registry-dns-durable-fix.md), **both now have the
+same fix, and neither requires recreating the cluster**:
 
 1. **containerd doesn't trust `registry:5000` as insecure HTTP** (missing
    `infra/registries.yaml` trust config) — symptom: an `x509`/TLS error,
-   or `http: server gave HTTP response to HTTPS client`. Fixed below,
-   **without** deleting/recreating the cluster.
-2. **The node can't resolve the hostname `registry` at all** (missing
-   `--host-alias`) — symptom: `dial tcp: lookup registry: no such host`.
-   This one genuinely **does require recreating the cluster** — see the
-   callout at the end of this section, don't skip it.
+   or `http: server gave HTTP response to HTTPS client`.
+2. **The node can't resolve the hostname `registry` at all** — symptom:
+   `dial tcp: lookup registry: no such host`. Historically fixed with
+   `--host-alias` (a full cluster recreate, and the actual root cause of
+   three separate incidents — see
+   [014](docs/decisions/014-registry-dns-durable-fix.md) for the full
+   investigation). `infra/registries.yaml`'s `mirrors.endpoint` now
+   points at the registry Service's pinned ClusterIP
+   (`http://10.43.99.99:5000`) directly, not the hostname — a literal IP
+   needs no resolution at all, so this problem can no longer recur from a
+   Docker Desktop restart, host sleep/wake, or crash.
 
-**Fixing problem 1** (containerd trust), if your cluster was created
-before `infra/registries.yaml` existed, or you skipped `--registry-config`
-in step 1 — apply it directly to the running node.
+Both problems are fixed by the same file and the same procedure below —
+apply `infra/registries.yaml` to the running node.
 **Verified against this project's real cluster: this only needs a soft
 restart, not a full `k3d cluster delete`/`create`:**
 
@@ -365,39 +370,24 @@ Confirm containerd picked it up:
 docker exec k3d-radio-maas-server-0 cat "/var/lib/rancher/k3s/agent/etc/containerd/certs.d/registry:5000/hosts.toml"
 ```
 
-Expect a generated `hosts.toml` naming `http://registry:5000`. This is a
+Expect a generated `hosts.toml` naming `http://10.43.99.99:5000` as the
+mirror endpoint (the registry Service's pinned ClusterIP, not the
+hostname `registry` — see
+[014](docs/decisions/014-registry-dns-durable-fix.md) for why). This is a
 one-time step per cluster — the config lives on the node's filesystem,
 not in an `emptyDir` volume, so (unlike the Vault/MinIO/registry secrets
-above) it survives ordinary pod restarts; it's only lost if the cluster
-itself is deleted and recreated.
+above) it survives ordinary pod restarts, and — as of 014 — also survives
+the kind of restart that used to wipe `--host-alias`'s `/etc/hosts` entry
+(a Docker Desktop engine cycle, host sleep/wake, or crash), since k3s
+itself re-reads this file from the node's own disk on every one of its
+own startups. It's only lost if the cluster itself is deleted and
+recreated.
 
-**Fixing problem 2** (node DNS resolution) — **this one requires
-recreating the cluster**, confirmed by direct investigation: `--host-alias`
-is a k3d flag that writes a static `/etc/hosts` entry into the node
-container at creation time, and it survives ordinary `k3d cluster
-stop`/`start` restarts (k3d re-injects it every restart from its own
-tracked cluster config) — but there is no supported way to add it to an
-already-running cluster after the fact. A manual `docker exec ... >>
-/etc/hosts` edit on a running node *looks* like it works immediately, but
-does **not** survive even a soft restart (Docker regenerates `/etc/hosts`
-fresh on every container start unless `--host-alias`/`--add-host` was set
-at creation) — confirmed by testing exactly that sequence and watching the
-manual edit disappear. If your existing cluster doesn't have this fix:
-
-```bash
-k3d cluster delete radio-maas
-k3d cluster create radio-maas \
-  --registry-config infra/registries.yaml \
-  --host-alias 10.43.99.99:registry
-```
-
-This deletes all cluster data (same "when in doubt, delete and recreate"
-tradeoff documented in [RUNBOOK.md](docs/RUNBOOK.md)'s symptom table for
-a stranded cluster) — you'll need to redo the ArgoCD bootstrap (step 2)
-and every one-time seeding step in this section again from scratch. There
-is no lighter-weight fix for this specific problem; it's a real,
-structural limitation of how Docker/k3d assign node-level `/etc/hosts`
-entries, not a workaround-able configuration gap.
+`--host-alias 10.43.99.99:registry` stays in step 1's cluster-creation
+command for now (harmless, and not worth a doc-wide removal for a flag
+that costs nothing to keep) — but it's no longer load-bearing for the
+registry specifically. A fresh cluster created **without** it will still
+resolve the registry correctly through the `mirrors.endpoint` fix above.
 
 ### 5. Set up Gitea — manual, can't be scripted
 

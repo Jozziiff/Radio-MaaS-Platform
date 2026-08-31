@@ -63,7 +63,7 @@ from "the macro script itself is wrong" — don't skip ahead.
 | Frontend can't reach the backend at all | Backend not running, or `VITE_API_URL`/equivalent pointed at the wrong host | Confirm `curl localhost:8000/docs` works from the same machine the frontend is running on. |
 | A Kaniko Job or execution Job fails with a registry `401`/`unauthorized` error | `secret/registry` in Vault, or the `registry-htpasswd`/`registry-push-secret` Kubernetes Secrets, don't exist yet or are stale (a fresh cluster or a restarted registry pod loses the htpasswd Secret's *reference* validity if the underlying Vault secret was re-seeded with a different password without regenerating both Kubernetes Secrets to match) | Re-run the full sequence in [Getting started, step 4b](../README.md#4b-seed-the-registry-credential--required-on-every-fresh-cluster) — all three (Vault secret, `registry-htpasswd`, `registry-push-secret`) must be regenerated together from the same password, not independently |
 | A Kaniko Job or execution Job fails to pull/push with an `x509`/TLS error, or `http: server gave HTTP response to HTTPS client` | containerd doesn't trust `registry:5000` as an insecure registry yet — `infra/registries.yaml` was never applied to this cluster (a fresh `k3d cluster create` without `--registry-config`, or an existing cluster that predates this setup) | Apply `infra/registries.yaml` per [Getting started, step 4d](../README.md#4d-applying-inforegistriesyaml-to-an-existing-cluster) — a `docker cp` + `k3d cluster stop`/`start` sequence, **not** a full cluster recreate (verified live against this project's own cluster — see step 4d's own text for the exact commands and output) |
-| A Kaniko Job or execution Job fails with `dial tcp: lookup registry: no such host` | The k3d **node itself** can't resolve the Kubernetes Service name `registry` — only CoreDNS can, and only pods reach CoreDNS, never the node's own containerd. This cluster was created without `--host-alias 10.43.99.99:registry` (confirmed by direct investigation: `docker exec <server-node> cat /etc/hosts` shows no `registry` line at all) | **Requires recreating the cluster** — this is the one registry-related fix in this project that genuinely does, confirmed by testing that a manual `/etc/hosts` edit doesn't survive even a soft restart. See [Getting started, step 4d](../README.md#4d-applying-inforegistriesyaml-to-an-existing-cluster) for the exact `k3d cluster delete`/`create --host-alias ...` sequence and full re-seeding checklist. Do not confuse this with the TLS/x509 row above — that one is fixable without recreating; this one is not. |
+| A Kaniko Job or execution Job fails with `dial tcp: lookup registry: no such host` | The k3d **node itself** can't resolve the Kubernetes Service name `registry` — only CoreDNS can, and only pods reach CoreDNS, never the node's own containerd. This happened three times via `--host-alias`'s `/etc/hosts` entry silently disappearing after a Docker Desktop restart/sleep-resume/crash (it's a one-time k3d-CLI file write, not a durable Docker setting — see [014](decisions/014-registry-dns-durable-fix.md) for the full investigation) | **No longer requires recreating the cluster.** `infra/registries.yaml`'s `mirrors.endpoint` now points at the registry Service's pinned ClusterIP directly (`http://10.43.99.99:5000`), not the hostname — a literal IP needs no resolution, so this can't recur the same way again. If a cluster somehow doesn't have this fix yet (predates 014, or the file was reverted), apply it the same way as the TLS/trust row above: `docker cp infra/registries.yaml <server-node>:/etc/rancher/k3s/registries.yaml` + `k3d cluster stop`/`start`, no recreate. See [Getting started, step 4d](../README.md#4d-applying-inforegistriesyaml-to-an-existing-cluster). |
 
 ## Verifying each layer is actually up
 
@@ -117,11 +117,15 @@ docker run --rm --entrypoint sh minio/mc -c "
 
 **Recover a stranded k3d cluster** (Windows, after a reboot — see
 [M4-jwt-auth.md](decisions/M4-jwt-auth.md) for the real incident this
-came from — or after anything else that can silently drop the node's
-`--host-alias` DNS entry, like a Docker Desktop restart; this has now
-happened twice, see
-[009](decisions/009-backend-api-in-cluster-deployment.md)'s "registry-DNS-loss
-recovery recurred" section):
+came from — a genuinely stranded host port, `kubectl` unable to connect
+at all. **Not** the right recipe for a lost registry DNS resolution
+specifically — a Docker Desktop restart/sleep-resume/crash silently
+dropping the node's `--host-alias` entry caused three incidents that
+used to require exactly this full recreate, but as of
+[014](decisions/014-registry-dns-durable-fix.md) that specific trigger no
+longer does — see this file's own symptom-table row on
+`dial tcp: lookup registry: no such host` for the lighter fix now that
+it's not this):
 
 ```bash
 k3d cluster delete radio-maas
@@ -132,15 +136,17 @@ k3d cluster create radio-maas \
 
 **Always use this exact command, both flags together — never a bare
 `k3d cluster create radio-maas`.** Omitting `--registry-config` breaks
-containerd's trust of the in-cluster registry (TLS/x509 errors); omitting
-`--host-alias` breaks the node's ability to resolve the hostname
-`registry` at all (`dial tcp: lookup registry: no such host`) — and,
-unlike the trust config, `--host-alias` can only be set at
-cluster-*creation* time, so getting this flag right the first time
-avoids a second recreate. See [Getting started, step
+containerd's trust of the in-cluster registry (TLS/x509 errors) and its
+ability to resolve `registry:5000` (`dial tcp: lookup registry: no such
+host`) — both now come from the same file
+([014](decisions/014-registry-dns-durable-fix.md)), and both can be
+applied to an already-running cluster without recreating it (step 4d
+below). `--host-alias` is kept in this command too, for a fresh cluster,
+as a harmless belt-and-suspenders default — it's no longer load-bearing
+for the registry specifically. See [Getting started, step
 1](../README.md#1-create-the-cluster) for the full explanation of why
 each flag exists, and step 4d for what to do if you're not sure whether
-your current cluster already has both.
+your current cluster already has the registry fix.
 
 Recreating the cluster is otherwise safe to do at any time, but it is
 **not free** — and, as of

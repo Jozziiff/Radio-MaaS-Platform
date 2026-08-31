@@ -13,7 +13,24 @@
 # this project's own cluster NOT to require a full delete/recreate, see
 # README.md's "Applying infra/registries.yaml to an existing cluster"
 # step and docs/RUNBOOK.md's recovery steps).
+#
+# endpoint is the registry Service's PINNED ClusterIP (infra/registry.yaml,
+# clusterIP: 10.43.99.99), not the hostname "registry" -- deliberately, as
+# of docs/decisions/013-per-user-accounts.md's third-occurrence
+# investigation. A literal IP needs no hostname resolution at all (nothing
+# to look up -- the HTTP client dials it directly), which is exactly what
+# --host-alias's node-level /etc/hosts entry was patching around. Unlike
+# that /etc/hosts edit (a one-time k3d-CLI file write with nothing to
+# reapply it after a Docker Desktop restart/sleep-resume/crash -- the root
+# cause of three real incidents), this file is read by k3s itself, from
+# the node's own disk, on every one of k3s's own startups ("Upon startup,
+# K3s will check to see if /etc/rancher/k3s/registries.yaml exists" --
+# https://docs.k3s.io/installation/private-registry) -- so it's
+# regenerated from source on every node restart, for any reason, with no
+# separate command required. Confirmed working against a real
+# Docker-Desktop-restart-equivalent disruption, not just "looks
+# configured" -- see that decision doc's verification section.
 mirrors:
   "registry:5000":
     endpoint:
-      - "http://registry:5000"
+      - "http://10.43.99.99:5000"

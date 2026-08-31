@@ -1,0 +1,15 @@
+# M7: the build context is now the repo root (see Dockerfile's own
+# comments) since the image builds both services/frontend/ and
+# services/backend-api/. Without this file, Docker would upload the whole
+# working tree (including .git/) to the daemon on every build, and a
+# locally-installed services/frontend/node_modules/ would get copied
+# straight into the image by `COPY services/frontend/ ./` -- silently
+# overwriting the clean `npm ci` output the frontend-build stage just
+# produced, with whatever happens to be on the host's filesystem.
+.git/
+**/node_modules
+services/frontend/dist
+services/backend-api/__pycache__/
+services/backend-api/*.pyc
+services/backend-api/.pytest_cache/
+services/backend-api/registry.db

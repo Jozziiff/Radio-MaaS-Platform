@@ -1,13 +1,21 @@
 """Vault client (M4): fetches secrets from HashiCorp Vault instead of hardcoded/placeholder values.
 
 Reads VAULT_ADDR (default `http://vault:8200`, matching infra/vault.yaml's
-Service) and VAULT_TOKEN from the environment. VAULT_TOKEN here is the dev
-root token (`devroot`, from infra/vault.yaml's `-dev-root-token-id=devroot`)
--- a real deployment would authenticate via AppRole or Kubernetes auth
-instead of a static root token, the same simplification already flagged for
-skipping the External Secrets Operator in this milestone (see
-docs/decisions/M3-minio-object-storage.md and M4-jwt-auth.md for the
-env-var secrets this replaces).
+Service) and VAULT_TOKEN from the environment.
+
+M7: Vault now runs with real persistence (raft storage) and a real,
+generated root token from its one-time `vault operator init` -- no more
+fixed `devroot` value, so VAULT_TOKEN has no hardcoded default any more
+and must be set by whoever's running this (an env var for local
+`uvicorn --reload` dev, a Secret-sourced env var in-cluster, see
+infra/backend-api.yaml). Using Vault's root token as backend-api's own
+standing credential, rather than a scoped policy/token created for this
+one app, is a deliberate, named simplification -- not an oversight. See
+docs/decisions/012-vault-simplified-unseal.md for the full reasoning
+(this cluster has no RBAC boundary separating "kubectl access" from
+"Vault access" today, so a scoped policy would protect a distinction
+that doesn't functionally exist here yet) and the same reasoning applied
+to the seal itself.
 
 Every read raises `VaultSecretError` -- with a message naming the exact
 secret path or field involved -- if Vault is unreachable, the secret path
@@ -23,7 +31,7 @@ from hvac.exceptions import InvalidPath
 from requests.exceptions import ConnectionError as RequestsConnectionError
 
 VAULT_ADDR = os.environ.get("VAULT_ADDR", "http://vault:8200")
-VAULT_TOKEN = os.environ.get("VAULT_TOKEN", "devroot")
+VAULT_TOKEN = os.environ.get("VAULT_TOKEN", "")
 
 
 class VaultSecretError(RuntimeError):

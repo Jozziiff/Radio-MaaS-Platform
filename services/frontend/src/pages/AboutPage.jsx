@@ -14,13 +14,13 @@ export default function AboutPage({ page, onNavigate }) {
     <Shell page={page} onNavigate={onNavigate}>
       <TopBar title="About" description="What this platform is, and who built it." />
 
-      <main className="mx-auto max-w-2xl px-8 pb-10 space-y-4">
-        <Card className="p-8">
-          <div className="flex items-center gap-3">
-            <img src="/Orange-logo.png" alt="Orange" className="h-8 w-8 object-contain" />
-            <h2 className="font-mono text-base font-medium text-signal-100">radio-maas</h2>
+      <main className="mx-auto max-w-3xl px-8 pb-16 space-y-6">
+        <Card className="p-10">
+          <div className="flex items-center gap-4">
+            <img src="/Orange-logo.png" alt="Orange" className="h-14 w-14 object-contain" />
+            <h2 className="font-mono text-xl font-medium text-signal-100">radio-maas</h2>
           </div>
-          <p className="mt-4 text-sm leading-relaxed text-signal-300">
+          <p className="mt-6 text-base leading-relaxed text-signal-200">
             A Macro-as-a-Service platform built for Orange Tunisie's RADIO-OPTIM
             team. It turns manually-run Python radio-analysis scripts ("macros")
             into on-demand, containerized services, with a web interface for
@@ -29,20 +29,20 @@ export default function AboutPage({ page, onNavigate }) {
           </p>
         </Card>
 
-        <Card className="p-8">
-          <h2 className="text-sm font-medium text-signal-100">Built by</h2>
-          <div className="mt-4 flex items-center gap-4">
+        <Card className="p-10">
+          <h2 className="text-base font-medium text-signal-100">Built by</h2>
+          <div className="mt-6 flex items-center gap-6">
             <img
               src="/picture.jpg"
               alt="Youssef Hamdani"
-              className="h-16 w-16 shrink-0 rounded-full object-cover object-[50%_20%] ring-2 ring-signal-700"
+              className="h-24 w-24 shrink-0 rounded-full object-cover object-[50%_20%] ring-2 ring-signal-700"
             />
             <div>
-              <p className="text-sm font-medium text-signal-100">Youssef Hamdani</p>
-              <p className="mt-0.5 text-sm text-signal-400">
+              <p className="text-base font-medium text-signal-100">Youssef Hamdani</p>
+              <p className="mt-1 text-sm text-signal-200">
                 Réseaux et Télécommunications engineering student, INSAT
               </p>
-              <p className="mt-0.5 text-sm text-signal-400">
+              <p className="mt-1 text-sm text-signal-200">
                 Developed as a summer internship project at Orange Tunisie (2026)
               </p>
             </div>

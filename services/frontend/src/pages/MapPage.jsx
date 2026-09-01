@@ -334,7 +334,7 @@ function TowerPopup({ tower, showingRange, onToggleRange }) {
 function PopupRow({ label, value }) {
   return (
     <div className="flex items-center justify-between gap-3">
-      <dt className="text-signal-500">{label}</dt>
+      <dt className="text-signal-400">{label}</dt>
       <dd className="font-medium">{value}</dd>
     </div>
   );

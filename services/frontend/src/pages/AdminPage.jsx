@@ -411,7 +411,7 @@ function RoleBadge({ role }) {
   const isAdmin = role === "admin";
   const style = isAdmin
     ? "border-amber-500/30 bg-amber-500/10 text-amber-500"
-    : "border-signal-600 bg-signal-800 text-signal-300";
+    : "border-signal-600 bg-signal-800 text-signal-200";
   return (
     <span
       className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${style}`}

@@ -42,8 +42,14 @@ service talks to MinIO's API rather than only setting env vars for a Job
 to use.
 
 M6: CORS enabled for the new services/frontend/ dev server (Vite, default
-port 5173). Scoped to that one localhost origin -- see the CORSMiddleware
-comment below for why this isn't the real deployment answer.
+port 5173), scoped to that one localhost origin.
+
+M7: CORS removed entirely -- the frontend is now built and served from
+this same process (see STATIC_DIR and _register_static_routes below, and
+the root Dockerfile), so every request is same-origin and there's no
+cross-origin request left for CORS to govern. `npm run dev`'s local loop
+still runs on two ports, but stays same-origin from the browser's
+perspective via services/frontend/vite.config.js's dev-server proxy.
 
 M6 (continued): the in-memory BUILT_MACROS dict is gone -- built macros
 now live in a real SQLite database (db.py), so GET /macros survives a

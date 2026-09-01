@@ -13,3 +13,12 @@ services/backend-api/__pycache__/
 services/backend-api/*.pyc
 services/backend-api/.pytest_cache/
 services/backend-api/registry.db
+# Same class of leak, different direction: services/backend-api/static/
+# is a local placeholder (or a stale local `npm run build` output) that
+# main.py's own tests need on disk -- see its own .gitignore entry. The
+# Dockerfile's `COPY services/backend-api/ .` runs BEFORE the frontend
+# stage's `COPY --from=frontend-build /frontend/dist ./static`, and
+# Docker's COPY into an existing directory merges rather than replaces --
+# so without this exclusion, any stale local file here would ride along
+# into the image underneath the real build output.
+services/backend-api/static

@@ -43,7 +43,7 @@ resolve_python() {
 preflight() {
   log "Checking required tools..."
   local tool
-  for tool in docker k3d kubectl curl vault; do
+  for tool in docker k3d kubectl curl vault openssl; do
     command -v "$tool" &>/dev/null || fail "'$tool' is required but not found on PATH."
   done
   PYTHON_BIN="$(resolve_python)"
@@ -282,6 +282,75 @@ ensure_vault() {
   kill "$pf_pid" 2>/dev/null || true
 }
 
+# The three registry-credential artifacts (secret/registry in Vault,
+# registry-htpasswd, registry-push-secret) must exist together or not at
+# all -- RUNBOOK.md documents a mismatched-password 401 as the failure mode
+# for a partial state. This function refuses to guess: it reports exactly
+# which resource(s) are present/missing (never the credential values
+# themselves) and stops rather than continuing past an inconsistency.
+ensure_registry_credentials() {
+  log "Checking registry credentials..."
+
+  # Own port-forward: ensure_vault() already tore down its own by the time
+  # this function runs (each phase's Vault access is self-contained, not
+  # relying on another function's still-live port-forward or shell state).
+  local pf_pid
+  kubectl port-forward svc/vault 8200:8200 &>/tmp/bootstrap-vault-pf-2.log &
+  pf_pid=$!
+  sleep 2
+  export VAULT_ADDR="http://localhost:8200"
+  export VAULT_TOKEN="$ROOT_TOKEN"
+
+  local has_vault_secret=false has_htpasswd=false has_push_secret=false
+  vault kv get secret/registry &>/dev/null && has_vault_secret=true
+  kubectl get secret registry-htpasswd &>/dev/null && has_htpasswd=true
+  kubectl get secret registry-push-secret &>/dev/null && has_push_secret=true
+
+  local count=0
+  $has_vault_secret && count=$((count+1))
+  $has_htpasswd && count=$((count+1))
+  $has_push_secret && count=$((count+1))
+
+  if [ "$count" -eq 3 ]; then
+    log "Registry credentials already fully seeded -- skipping."
+    REGISTRY_PASSWORD="$(vault kv get -field=password secret/registry)"
+    kill "$pf_pid" 2>/dev/null || true
+    return 0
+  fi
+
+  if [ "$count" -ne 0 ]; then
+    kill "$pf_pid" 2>/dev/null || true
+    fail "$(cat <<EOF
+Registry credentials are in an INCONSISTENT state -- refusing to guess.
+  secret/registry (Vault):     $([ "$has_vault_secret" = true ] && echo present || echo MISSING)
+  registry-htpasswd (K8s):     $([ "$has_htpasswd" = true ] && echo present || echo MISSING)
+  registry-push-secret (K8s):  $([ "$has_push_secret" = true ] && echo present || echo MISSING)
+
+All three must exist together, generated from the same password (see README
+step 4b). Manually delete whichever ARE present and re-run this script, or
+regenerate the missing ones by hand to match the existing password.
+EOF
+)"
+  fi
+
+  log "Generating registry credentials..."
+  REGISTRY_PASSWORD="$(openssl rand -hex 20)"
+  vault kv put secret/registry username=registry-push password="$REGISTRY_PASSWORD"
+
+  docker run --rm --entrypoint htpasswd httpd:2 -Bbn registry-push "$REGISTRY_PASSWORD" > /tmp/bootstrap-registry.htpasswd
+  kubectl create secret generic registry-htpasswd --from-file=htpasswd=/tmp/bootstrap-registry.htpasswd
+  rm -f /tmp/bootstrap-registry.htpasswd
+
+  kubectl create secret docker-registry registry-push-secret \
+    --docker-server=registry:5000 \
+    --docker-username=registry-push \
+    --docker-password="$REGISTRY_PASSWORD" \
+    --docker-email=noreply@example.invalid
+
+  kill "$pf_pid" 2>/dev/null || true
+  log "Registry credentials created."
+}
+
 main() {
   preflight
   preflight_registry_auth
@@ -290,7 +359,8 @@ main() {
   ensure_argocd
   ensure_minio_buckets
   ensure_vault
-  log "MinIO and Vault bootstrap complete. (Remaining phases added in later tasks.)"
+  ensure_registry_credentials
+  log "Registry credentials complete. (Remaining phases added in later tasks.)"
 }
 
 main "$@"

@@ -15,8 +15,15 @@
 // docs/decisions/013-per-user-accounts.md). App.jsx's Routes additionally
 // guards the page itself, since hiding this link alone wouldn't stop
 // someone from reaching page === "admin" through stale state.
+//
+// M7: About, unlike Admin, is visible to every session -- it's a static
+// credit/description page, not privileged data.
+//
+// The wordmark badge (top-left) uses Orange's own logo instead of a
+// lucide icon -- the one spot in the persistent shell where a real brand
+// mark belongs, alongside the About page's own header.
 
-import { LayoutGrid, History, Map, ShieldCheck, LogOut, Radio } from "lucide-react";
+import { LayoutGrid, History, Map, ShieldCheck, Info, LogOut } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 
 export default function Sidebar({ page, onNavigate, giteaLink, className = "" }) {
@@ -28,9 +35,11 @@ export default function Sidebar({ page, onNavigate, giteaLink, className = "" })
     >
 
       <div className="flex items-center gap-2 px-2">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/10 text-amber-500">
-          <Radio className="h-4 w-4" strokeWidth={2} />
-        </span>
+        <img
+          src="/Orange-logo.png"
+          alt="Orange"
+          className="h-7 w-7 shrink-0 rounded-lg object-cover"
+        />
         <span className="font-mono text-sm font-medium tracking-tight text-signal-100">
           radio-maas
         </span>
@@ -63,6 +72,12 @@ export default function Sidebar({ page, onNavigate, giteaLink, className = "" })
             onClick={() => onNavigate("admin")}
           />
         )}
+        <SidebarLink
+          icon={Info}
+          label="About"
+          active={page === "about"}
+          onClick={() => onNavigate("about")}
+        />
       </nav>
 
       {giteaLink && <div className="mt-4 px-2">{giteaLink}</div>}

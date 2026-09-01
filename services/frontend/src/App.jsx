@@ -5,10 +5,11 @@ import CatalogPage from "./pages/CatalogPage";
 import HistoryPage from "./pages/HistoryPage";
 import MapPage from "./pages/MapPage";
 import AdminPage from "./pages/AdminPage";
+import AboutPage from "./pages/AboutPage";
 
 // No router: just a handful of pages behind a session gate, so a plain
-// "catalog" | "history" | "map" | "admin" string is enough -- see
-// components/Sidebar.jsx for the shared shell.
+// "catalog" | "history" | "map" | "admin" | "about" string is enough --
+// see components/Sidebar.jsx for the shared shell.
 function Routes() {
   const { session } = useAuth();
   const [page, setPage] = useState("catalog");
@@ -27,6 +28,7 @@ function Routes() {
   if (!session) return <LoginPage />;
   if (page === "history") return <HistoryPage page={page} onNavigate={setPage} />;
   if (page === "map") return <MapPage page={page} onNavigate={setPage} />;
+  if (page === "about") return <AboutPage page={page} onNavigate={setPage} />;
   if (page === "admin" && session.role === "admin") {
     return <AdminPage page={page} onNavigate={setPage} />;
   }

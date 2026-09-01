@@ -290,6 +290,76 @@ scratch, in order:
    in the old cluster's registry, and their Gitea-mirrored repos only in
    the old Gitea instance.
 
+## Stopping the whole cluster
+
+```bash
+k3d cluster stop radio-maas
+```
+
+Pauses everything — every pod, and every PVC's data (Vault, MinIO,
+Gitea, the registry, `backend-api`'s own database) — without deleting
+any of it. This is a full stop of the Docker containers backing the
+cluster, not `k3d cluster delete` (which destroys the node and every PVC
+with it — see "Recover a stranded k3d cluster" above for the difference
+and what a real delete requires afterward).
+
+Bring it back exactly where you left off:
+
+```bash
+k3d cluster start radio-maas
+```
+
+No re-bootstrap needed — Vault comes back already initialized (its
+sidecar auto-unseals on its own, same as any pod restart), MinIO/Gitea's
+data and `backend-api`'s user accounts and execution history are all
+still there. Confirm it actually stopped, not just returned:
+
+```bash
+k3d cluster list                                             # SERVERS column: 0/1
+docker ps --filter "name=k3d-radio-maas" --format "{{.Names}}: {{.Status}}"   # no output = stopped
+```
+
+## Stopping local dev servers
+
+Only relevant to processes started manually on your own machine outside
+the cluster — `npm run dev` (the frontend, port 5173), `uvicorn
+--reload` (a local backend-api, port 8000), or a `kubectl port-forward`
+left running from a manual debugging session. **This does not touch the
+k3d cluster or anything running inside it** — see "Stopping the whole
+cluster" above for that.
+
+**If you started it in a foreground terminal tab:** `Ctrl+C` in that
+tab. This is the normal case and needs nothing further.
+
+**If it's a stray background process you've lost track of** (started
+with `&`, or from a session that's since closed) — find and kill it by
+the port it's using:
+
+macOS/Linux:
+```bash
+lsof -ti:5173 | xargs kill    # frontend dev server
+lsof -ti:8000 | xargs kill    # local backend-api (uvicorn --reload)
+```
+
+Windows (PowerShell):
+```powershell
+Get-NetTCPConnection -LocalPort 5173 | Select-Object -ExpandProperty OwningProcess | Stop-Process -Force
+Get-NetTCPConnection -LocalPort 8000 | Select-Object -ExpandProperty OwningProcess | Stop-Process -Force
+```
+
+To find every leftover `kubectl port-forward` regardless of which port
+it's using (these are the source of several confusing "why is this
+connection refused/stale" bugs found during this project's own
+testing — see [018](decisions/018-bootstrap-script-simplifications.md)'s
+third section):
+
+```powershell
+Get-Process | Where-Object { $_.Path -like "*kubectl*" } | Stop-Process -Force
+```
+```bash
+pkill -f "kubectl port-forward"
+```
+
 ## When it's not the infrastructure
 
 Once every row above checks out and the problem is still there, it's the

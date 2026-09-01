@@ -30,27 +30,16 @@ export default function LoginPage() {
 
       <div className="relative z-10 w-full max-w-sm">
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-4 flex h-11 w-11 items-center justify-center rounded-full border border-signal-600 bg-signal-900">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              className="h-5 w-5 text-amber-500"
-              aria-hidden="true"
-            >
-              <path
-                d="M12 2a10 10 0 0 1 0 20M12 6a6 6 0 0 1 0 12M12 10a2 2 0 0 1 0 4"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                strokeLinecap="round"
-              />
-            </svg>
-          </div>
+          <img
+            src="/Orange-logo.png"
+            alt="Orange"
+            className="mx-auto mb-4 h-11 w-11 rounded-full object-cover shadow-[0_0_24px_-6px_var(--color-amber-500)]"
+          />
           <h1 className="font-mono text-lg font-medium tracking-tight text-signal-100">
             radio-maas
           </h1>
-          <p className="mt-1 text-sm text-signal-400">
-            Macro-as-a-Service &middot; RADIO-OPTIM control panel
-          </p>
+          <p className="mt-1.5 text-sm font-medium text-amber-500">Macro-as-a-Service</p>
+          <p className="mt-0.5 text-sm text-signal-400">RADIO-OPTIM control panel</p>
         </div>
 
         <Card

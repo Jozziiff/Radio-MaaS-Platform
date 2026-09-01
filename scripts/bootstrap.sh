@@ -43,7 +43,7 @@ resolve_python() {
 preflight() {
   log "Checking required tools..."
   local tool
-  for tool in docker k3d kubectl curl; do
+  for tool in docker k3d kubectl curl vault; do
     command -v "$tool" &>/dev/null || fail "'$tool' is required but not found on PATH."
   done
   PYTHON_BIN="$(resolve_python)"

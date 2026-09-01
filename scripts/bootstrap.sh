@@ -181,13 +181,116 @@ ensure_argocd() {
   done
 }
 
+ensure_minio_buckets() {
+  log "Seeding MinIO buckets..."
+  local pf_pid
+  kubectl port-forward svc/minio 9000:9000 &>/tmp/bootstrap-minio-pf.log &
+  pf_pid=$!
+  sleep 2
+
+  local bucket output
+  for bucket in radio-data macro-results; do
+    output="$(docker run --rm --entrypoint sh minio/mc -c "
+      mc alias set devminio http://host.docker.internal:9000 devadmin devpassword123 &&
+      mc mb devminio/$bucket
+    " 2>&1 || true)"
+
+    if echo "$output" | grep -q "already own it"; then
+      log "Bucket '$bucket' already exists -- skipping."
+    elif echo "$output" | grep -qi "error\|fail"; then
+      kill "$pf_pid" 2>/dev/null || true
+      fail "Failed to create MinIO bucket '$bucket':
+$output"
+    else
+      log "Bucket '$bucket' created."
+    fi
+  done
+
+  kill "$pf_pid" 2>/dev/null || true
+}
+
+# `vault` CLI commands run through a host port-forward (not `kubectl exec`)
+# because the Vault pod's own container image lacks `openssl`, confirmed
+# during this project's own live Task 6 re-bootstrap.
+ensure_vault() {
+  log "Checking Vault..."
+  local pf_pid
+  kubectl port-forward svc/vault 8200:8200 &>/tmp/bootstrap-vault-pf.log &
+  pf_pid=$!
+  sleep 2
+  export VAULT_ADDR="http://localhost:8200"
+
+  if kubectl get secret vault-unseal-key &>/dev/null; then
+    log "Vault already initialized -- skipping init."
+  else
+    log "Initializing Vault..."
+    kubectl exec deploy/vault -c vault -- sh -c \
+      'export VAULT_ADDR=http://127.0.0.1:8200; vault operator init -key-shares=1 -key-threshold=1 -format=json' \
+      > /tmp/bootstrap-vault-init.json
+
+    local unseal_key root_token
+    unseal_key="$("$PYTHON_BIN" -c "import json; print(json.load(open('/tmp/bootstrap-vault-init.json'))['unseal_keys_b64'][0])")"
+    root_token="$("$PYTHON_BIN" -c "import json; print(json.load(open('/tmp/bootstrap-vault-init.json'))['root_token'])")"
+    rm -f /tmp/bootstrap-vault-init.json
+
+    kubectl create secret generic vault-unseal-key \
+      --from-literal=unseal_key="$unseal_key" \
+      --from-literal=root_token="$root_token"
+
+    log "Waiting for Vault's sidecar to auto-unseal (timeout 2m)..."
+    local deadline=$(( $(date +%s) + 120 ))
+    while true; do
+      local sealed
+      sealed="$(vault status -format=json 2>/dev/null | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin).get("sealed","true"))' 2>/dev/null || echo true)"
+      [ "$sealed" = "False" ] && break
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        kill "$pf_pid" 2>/dev/null || true
+        fail "Vault did not auto-unseal within 2 minutes."
+      fi
+      sleep 5
+    done
+    log "Vault unsealed."
+  fi
+
+  ROOT_TOKEN="$(kubectl get secret vault-unseal-key -o jsonpath='{.data.root_token}' | base64 -d)"
+  UNSEAL_KEY="$(kubectl get secret vault-unseal-key -o jsonpath='{.data.unseal_key}' | base64 -d)"
+  export VAULT_TOKEN="$ROOT_TOKEN"
+
+  if ! vault secrets list -format=json | "$PYTHON_BIN" -c 'import json,sys; sys.exit(0 if "secret/" in json.load(sys.stdin) else 1)' 2>/dev/null; then
+    log "Enabling KV v2 engine at secret/..."
+    vault secrets enable -path secret -version=2 kv
+  else
+    log "KV engine already enabled at secret/ -- skipping."
+  fi
+
+  if ! vault kv get secret/jwt &>/dev/null; then
+    log "Seeding secret/jwt..."
+    local jwt_key
+    jwt_key="$("$PYTHON_BIN" -c "import secrets; print(secrets.token_hex(32))")"
+    vault kv put secret/jwt signing_key="$jwt_key"
+  else
+    log "secret/jwt already seeded -- skipping."
+  fi
+
+  if ! vault kv get secret/minio &>/dev/null; then
+    log "Seeding secret/minio..."
+    vault kv put secret/minio access_key=devadmin secret_key=devpassword123
+  else
+    log "secret/minio already seeded -- skipping."
+  fi
+
+  kill "$pf_pid" 2>/dev/null || true
+}
+
 main() {
   preflight
   preflight_registry_auth
   prompt_admin_password
   ensure_cluster
   ensure_argocd
-  log "Cluster and ArgoCD bootstrap complete. (Remaining phases added in later tasks.)"
+  ensure_minio_buckets
+  ensure_vault
+  log "MinIO and Vault bootstrap complete. (Remaining phases added in later tasks.)"
 }
 
 main "$@"

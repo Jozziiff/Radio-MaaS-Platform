@@ -133,11 +133,61 @@ prompt_admin_password() {
   unset ADMIN_PW_CONFIRM
 }
 
+# Exact flag set pulled from README.md's current "Create the cluster" step.
+ensure_cluster() {
+  log "Checking for existing k3d cluster 'radio-maas'..."
+  if k3d cluster list -o json | "$PYTHON_BIN" -c \
+      'import json,sys; sys.exit(0 if any(c["name"]=="radio-maas" for c in json.load(sys.stdin)) else 1)'; then
+    log "Cluster 'radio-maas' already exists -- skipping creation."
+    return 0
+  fi
+
+  log "Creating cluster 'radio-maas'..."
+  k3d cluster create radio-maas \
+    --registry-config infra/registries.yaml \
+    --host-alias 10.43.99.99:registry \
+    -p "80:80@loadbalancer" \
+    -p "443:443@loadbalancer"
+}
+
+ensure_argocd() {
+  log "Checking for ArgoCD..."
+  if ! kubectl get namespace argocd &>/dev/null; then
+    log "Installing ArgoCD..."
+    kubectl create namespace argocd
+    kubectl apply -n argocd --server-side --force-conflicts \
+      -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+  else
+    log "ArgoCD namespace already exists -- skipping install."
+  fi
+
+  log "Applying infra/argocd-app.yaml..."
+  kubectl apply -f infra/argocd-app.yaml -n argocd
+
+  log "Waiting for radio-maas-infra to be Synced/Healthy (timeout 5m)..."
+  local deadline=$(( $(date +%s) + 300 ))
+  local sync health
+  while true; do
+    sync="$(kubectl get application radio-maas-infra -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
+    health="$(kubectl get application radio-maas-infra -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
+    if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
+      log "radio-maas-infra is Synced/Healthy."
+      break
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      fail "ArgoCD did not reach Synced/Healthy within 5 minutes (sync=$sync health=$health). Check: kubectl get application radio-maas-infra -n argocd -o yaml"
+    fi
+    sleep 10
+  done
+}
+
 main() {
   preflight
   preflight_registry_auth
   prompt_admin_password
-  log "Preflight and password setup complete. (Remaining phases added in later tasks.)"
+  ensure_cluster
+  ensure_argocd
+  log "Cluster and ArgoCD bootstrap complete. (Remaining phases added in later tasks.)"
 }
 
 main "$@"

@@ -53,6 +53,7 @@ def app_with_fake_dist(tmp_path, monkeypatch):
     assets_dir.mkdir(parents=True)
     (dist_dir / "index.html").write_text("<html><body>SPA SHELL</body></html>")
     (assets_dir / "index-ABC123.js").write_text("console.log('hi')")
+    (dist_dir / "favicon.svg").write_text("<svg>FAKE FAVICON</svg>")
 
     import main
 
@@ -101,6 +102,31 @@ def test_unmatched_client_route_serves_index_html_not_404(app_with_fake_dist):
 def test_deeply_nested_unmatched_path_also_serves_index_html(app_with_fake_dist):
     with TestClient(app_with_fake_dist) as client:
         response = client.get("/admin/some/deep/path")
+    assert response.status_code == 200
+    assert "SPA SHELL" in response.text
+
+
+def test_root_level_static_file_is_served_as_itself_not_the_spa_shell(app_with_fake_dist):
+    """A real, found-live bug: Vite copies everything under public/ (the
+    favicon, and any image an <img src="/x.png"> references) straight into
+    dist/'s own root, not dist/assets/ -- only /assets/* was ever mounted
+    as StaticFiles, so every one of these files fell through to the
+    catch-all and got index.html's HTML back instead of the real file.
+    """
+    with TestClient(app_with_fake_dist) as client:
+        response = client.get("/favicon.svg")
+    assert response.status_code == 200
+    assert "FAKE FAVICON" in response.text
+    assert "SPA SHELL" not in response.text
+
+
+def test_path_traversal_via_full_path_cannot_escape_static_dir(app_with_fake_dist):
+    """full_path comes straight from the request URL -- confirm a "../"
+    segment can't be used to read a file outside static_dir (e.g. this
+    module's own source, main.py, sitting one level up).
+    """
+    with TestClient(app_with_fake_dist) as client:
+        response = client.get("/../main.py")
     assert response.status_code == 200
     assert "SPA SHELL" in response.text
 

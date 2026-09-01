@@ -475,7 +475,10 @@ def test_build_macro_records_gitea_repo_url_on_success(monkeypatch):
         list_response = client.get("/macros", headers={"Authorization": f"Bearer {token}"})
 
     assert build_response.status_code == 200
-    assert list_response.json()[0]["gitea_repo_url"] == "http://gitea:3000/admin/rtwp-anomaly-demo"
+    assert (
+        list_response.json()[0]["gitea_repo_url"]
+        == f"{main.GITEA_EXTERNAL_URL}/admin/rtwp-anomaly-demo"
+    )
 
 
 def test_create_execution_returns_404_for_an_unbuilt_macro():

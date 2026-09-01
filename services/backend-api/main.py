@@ -999,12 +999,28 @@ def _register_static_routes(static_dir: Path) -> None:
 
     @app.get("/{full_path:path}")
     def spa_fallback(full_path: str) -> FileResponse:
-        """Serve the SPA shell for any path that matched no API route or
-        static asset above -- e.g. a colleague refreshing on /history or
+        """Serve a real static file if one exists at this path, else fall
+        back to the SPA shell -- e.g. a colleague refreshing on /history or
         /admin. Confirmed empirically this returns 200 with index.html's
         content, not a 404, for arbitrarily unmatched/nested paths (see
         the design spec's SPA fallback section).
+
+        Vite copies everything under services/frontend/public/ straight
+        into dist/'s own root (not dist/assets/) -- favicon.svg, icons.svg,
+        and any other root-level static file (a logo, an image referenced
+        by <img src="/x.png">, ...) previously fell through to this same
+        catch-all with no check at all, silently getting index.html's HTML
+        back for what should have been a real file (a real, found-live bug:
+        even the favicon was broken this way before this check existed).
+        Guarded with .resolve() + is_relative_to() against a full_path
+        containing "../" segments -- this route accepts arbitrary path
+        strings from the request, so it must not be possible to walk
+        outside static_dir to read an arbitrary file on the container's
+        filesystem.
         """
+        candidate = (static_dir / full_path).resolve()
+        if candidate.is_file() and candidate.is_relative_to(static_dir.resolve()):
+            return FileResponse(candidate)
         return FileResponse(static_dir / "index.html")
 
 

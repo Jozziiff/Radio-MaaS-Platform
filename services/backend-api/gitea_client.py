@@ -21,7 +21,14 @@ fails the whole `POST /macros/{technical_name}/build` request with a 422
 Reads GITEA_URL (default "http://gitea:3000", the in-cluster Service name
 from infra/gitea.yaml) and GITEA_USERNAME (the account that owns the
 token, needed to address that account's repos via Gitea's REST API) from
-the environment. GITEA_TOKEN is set once at startup by main.py's
+the environment. GITEA_URL is deliberately the in-cluster address, not a
+LAN-reachable one -- every call in this module runs server-side, inside
+the cluster, so the in-cluster Service name is the fastest and most
+reliable address. Building a browser-facing Gitea link (the "View in
+Gitea" link main.py stores per macro) is a separate concern with a
+separate env var, GITEA_EXTERNAL_URL -- see main.py's build_macro(). Do
+not reuse GITEA_URL for anything a browser will load. GITEA_TOKEN is set
+once at startup by main.py's
 lifespan(), from vault_client.get_gitea_token() -- the same Vault-sourced
 credential Kaniko's build Job already uses for its own git clone (see
 docs/decisions/008-kaniko-instead-of-docker-socket.md). Confirmed (not

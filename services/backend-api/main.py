@@ -195,6 +195,18 @@ MINIO_OUTPUT_BUCKET = "macro-results"
 # (an address, like JOB_MINIO_ENDPOINT), so it stays a plain constant.
 REGISTRY_HOST = "registry:5000"
 
+# M7: the browser-facing address for "View in Gitea" links, distinct from
+# gitea_client.GITEA_URL (which stays the in-cluster Service address for
+# backend-api's own server-side API calls -- see gitea_client.py's
+# docstring). Gitea is exposed via a fixed NodePort, not the Traefik
+# Ingress backend-api itself uses (infra/gitea.yaml explains why: a
+# shared-port Ingress would need Gitea's own ROOT_URL/subpath rewriting,
+# not worth the risk for an internal tool). Same overridable-via-env-var
+# pattern as MINIO_ENDPOINT above, for the same reason: this value must
+# resolve from an employee's own browser, which the default below only
+# does when the browser is on the same machine as the cluster.
+GITEA_EXTERNAL_URL = os.environ.get("GITEA_EXTERNAL_URL", "http://localhost:30300")
+
 # Kubernetes Secret name both build_job_manifest's imagePullSecrets and
 # builder.py's Kaniko Job reference -- created once via
 # `kubectl create secret docker-registry ...` per README.md's step 4b
@@ -793,7 +805,7 @@ async def build_macro(
     except InvalidIconError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    db.update_gitea_url(technical_name, f"{gitea_client.GITEA_URL}/{gitea_client.GITEA_USERNAME}/{technical_name}")
+    db.update_gitea_url(technical_name, f"{GITEA_EXTERNAL_URL}/{gitea_client.GITEA_USERNAME}/{technical_name}")
 
     return MacroBuilt(image_tag=image_tag, **analysis, artifacts=artifacts)
 

@@ -40,6 +40,25 @@ resolve_python() {
   fi
 }
 
+# Shared by ensure_backend_api() (to set GITEA_EXTERNAL_URL to something an
+# employee's browser can reach) and write_credentials_file() (to print the
+# access URL) -- previously duplicated inline in the latter only; factored
+# out once a second real caller needed the same detection. Doesn't open a
+# real connection (UDP connect() to a public IP just makes the OS pick a
+# local route/source address), so this works even with no real internet
+# access as long as local routing is configured.
+detect_lan_ip() {
+  "$PYTHON_BIN" -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(('8.8.8.8', 80))
+    print(s.getsockname()[0])
+finally:
+    s.close()
+" 2>/dev/null || echo "<could not detect>"
+}
+
 # Confirmed live (a real, load-bearing finding from a security review of
 # this script): `vault kv get secret/x &>/dev/null` alone is NOT a
 # reliable existence check for KV v2. A soft-deleted-then-destroyed secret
@@ -154,6 +173,13 @@ prompt_admin_password() {
 }
 
 # Exact flag set pulled from README.md's current "Create the cluster" step.
+# Port 30300 is Gitea's fixed NodePort (infra/gitea.yaml) -- published
+# straight through from the server node (not "@loadbalancer": NodePorts
+# are exposed on nodes, Traefik's LB is a separate 80/443-only frontend)
+# so "View in Gitea" links resolve from an employee's own browser, not
+# just from inside the cluster. See infra/gitea.yaml's own comment for
+# why this is a dedicated port rather than a path on the existing
+# Traefik Ingress.
 ensure_cluster() {
   log "Checking for existing k3d cluster 'radio-maas'..."
   if k3d cluster list -o json | "$PYTHON_BIN" -c \
@@ -167,7 +193,8 @@ ensure_cluster() {
     --registry-config infra/registries.yaml \
     --host-alias 10.43.99.99:registry \
     -p "80:80@loadbalancer" \
-    -p "443:443@loadbalancer"
+    -p "443:443@loadbalancer" \
+    -p "30300:30300@server:0"
 }
 
 ensure_argocd() {
@@ -184,18 +211,31 @@ ensure_argocd() {
   log "Applying infra/argocd-app.yaml..."
   kubectl apply -f infra/argocd-app.yaml -n argocd
 
-  log "Waiting for radio-maas-infra to be Synced/Healthy (timeout 5m)..."
+  # Only wait for Synced, not also Healthy -- a real deadlock otherwise on
+  # any genuinely fresh cluster. registry and backend-api's Deployments
+  # cannot go Healthy yet at this point in the script: registry mandatorily
+  # mounts a registry-htpasswd Secret that doesn't exist until
+  # ensure_registry_credentials() runs (below), and backend-api references
+  # an image that doesn't exist until ensure_backend_api() builds and
+  # pushes it (also below) -- both necessarily run *after* this function
+  # returns. Synced (ArgoCD has applied every manifest) is the real
+  # precondition the rest of this script needs; individual Deployments
+  # becoming healthy is what ensure_registry_credentials()'s and
+  # ensure_backend_api()'s own explicit pod-restart-and-readiness-wait
+  # logic verify later, once they've actually supplied what those pods are
+  # missing. Confirmed live: requiring Healthy here hung for the full 5m
+  # timeout on a fresh cluster with no prior credentials/image at all.
+  log "Waiting for radio-maas-infra to be Synced (timeout 5m)..."
   local deadline=$(( $(date +%s) + 300 ))
-  local sync health
+  local sync
   while true; do
     sync="$(kubectl get application radio-maas-infra -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
-    health="$(kubectl get application radio-maas-infra -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
-    if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
-      log "radio-maas-infra is Synced/Healthy."
+    if [ "$sync" = "Synced" ]; then
+      log "radio-maas-infra is Synced."
       break
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      fail "ArgoCD did not reach Synced/Healthy within 5 minutes (sync=$sync health=$health). Check: kubectl get application radio-maas-infra -n argocd -o yaml"
+      fail "ArgoCD did not reach Synced within 5 minutes (sync=$sync). Check: kubectl get application radio-maas-infra -n argocd -o yaml"
     fi
     sleep 10
   done
@@ -244,28 +284,41 @@ ensure_vault() {
     log "Vault already initialized -- skipping init."
   else
     log "Initializing Vault..."
-    kubectl exec deploy/vault -c vault -- sh -c \
-      'export VAULT_ADDR=http://127.0.0.1:8200; vault operator init -key-shares=1 -key-threshold=1 -format=json' \
-      > /tmp/bootstrap-vault-init.json
+    local init_json
+    init_json="$(kubectl exec deploy/vault -c vault -- sh -c \
+      'export VAULT_ADDR=http://127.0.0.1:8200; vault operator init -key-shares=1 -key-threshold=1 -format=json')"
 
+    # Piped through stdin, not a /tmp file: native Windows Python resolves
+    # a literal /tmp/... path to C:\tmp\..., a different location from
+    # Git-Bash's own /tmp mount -- confirmed live (a real FileNotFoundError
+    # from Python trying to open a file bash had actually written
+    # elsewhere). Keeping this in a shell variable and piping it in avoids
+    # the cross-tool path mismatch entirely, same fix already applied to
+    # ensure_registry_credentials()'s dockerconfigjson generation.
     local unseal_key root_token
-    unseal_key="$("$PYTHON_BIN" -c "import json; print(json.load(open('/tmp/bootstrap-vault-init.json'))['unseal_keys_b64'][0])")"
-    root_token="$("$PYTHON_BIN" -c "import json; print(json.load(open('/tmp/bootstrap-vault-init.json'))['root_token'])")"
-    rm -f /tmp/bootstrap-vault-init.json
+    unseal_key="$(printf '%s' "$init_json" | "$PYTHON_BIN" -c "import json,sys; print(json.load(sys.stdin)['unseal_keys_b64'][0])")"
+    root_token="$(printf '%s' "$init_json" | "$PYTHON_BIN" -c "import json,sys; print(json.load(sys.stdin)['root_token'])")"
+    unset init_json
 
     kubectl create secret generic vault-unseal-key \
       --from-literal=unseal_key="$unseal_key" \
       --from-literal=root_token="$root_token"
 
-    log "Waiting for Vault's sidecar to auto-unseal (timeout 2m)..."
-    local deadline=$(( $(date +%s) + 120 ))
+    # 4m, not 2m: confirmed live on a genuinely fresh cluster that a cold
+    # image pull for the vault pod alone can eat well over 2 minutes before
+    # `vault status` is even reachable, leaving too little of the old
+    # budget for the actual unseal handshake afterward. This is a one-time
+    # cold-start cost (an already-pulled image on a re-run is fast), not a
+    # sign the sidecar itself is slow.
+    log "Waiting for Vault's sidecar to auto-unseal (timeout 4m)..."
+    local deadline=$(( $(date +%s) + 240 ))
     while true; do
       local sealed
       sealed="$(vault status -format=json 2>/dev/null | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin).get("sealed","true"))' 2>/dev/null || echo true)"
       [ "$sealed" = "False" ] && break
       if [ "$(date +%s)" -ge "$deadline" ]; then
         kill "$pf_pid" 2>/dev/null || true
-        fail "Vault did not auto-unseal within 2 minutes."
+        fail "Vault did not auto-unseal within 4 minutes."
       fi
       sleep 5
     done
@@ -487,8 +540,22 @@ EOF
   create_output="$(printf '%s' "$ADMIN_PW" | kubectl exec -i "$gitea_pod" -- su git -c \
     'IFS= read -r GITEA_PW; gitea admin user create --username macros --password "$GITEA_PW" --email macros@radio-maas.local --admin --access-token --access-token-name radio-maas-backend --access-token-scopes "write:repository,write:user,read:repository,read:user"')"
 
+  # Parsed with Python, not `grep -oP`: the lookbehind syntax needs PCRE
+  # support and a UTF-8 locale, and this project has already hit one real
+  # environment (this session's own Windows/Git-Bash setup) where grep
+  # fails outright with "supports only unibyte and UTF-8 locales" -- a
+  # hard error, not silently wrong output, but still a portability gap
+  # worth avoiding since Python is already a required dependency.
   local gitea_token
-  gitea_token="$(echo "$create_output" | grep -oP '(?<=successfully created\.\.\. )\S+' || true)"
+  gitea_token="$(printf '%s' "$create_output" | "$PYTHON_BIN" -c "
+import sys
+marker = 'successfully created... '
+text = sys.stdin.read()
+idx = text.find(marker)
+if idx == -1:
+    sys.exit(1)
+print(text[idx + len(marker):].split()[0])
+" || true)"
   if [ -z "$gitea_token" ]; then
     kill "$pf_pid" 2>/dev/null || true
     fail "Could not parse the access token from Gitea's create output:
@@ -529,6 +596,22 @@ ensure_backend_api() {
   docker push host.docker.internal:5000/backend-api:latest
 
   kill "$pf_pid" 2>/dev/null || true
+
+  # infra/backend-api.yaml's GITEA_EXTERNAL_URL default (localhost:30300)
+  # only resolves from a browser on this same machine -- set it to this
+  # machine's real LAN IP on the *live* Deployment so "View in Gitea"
+  # links work from a colleague's own browser too. `kubectl set env`, not
+  # an edit to the manifest itself: infra/backend-api.yaml is GitOps-managed
+  # (applied via ensure_argocd's sync, never kubectl-applied directly here)
+  # -- editing the checked-in YAML with a machine-specific IP would drift
+  # from git and get silently reverted on ArgoCD's next sync anyway.
+  local lan_ip
+  lan_ip="$(detect_lan_ip)"
+  if [ "$lan_ip" != "<could not detect>" ]; then
+    kubectl set env deployment/backend-api "GITEA_EXTERNAL_URL=http://$lan_ip:30300"
+  else
+    log "WARNING: could not detect this machine's LAN IP -- GITEA_EXTERNAL_URL left at its http://localhost:30300 default, which only works from a browser on this same machine. Set it manually: kubectl set env deployment/backend-api GITEA_EXTERNAL_URL=http://<this-machine-LAN-IP>:30300"
+  fi
 
   # infra/backend-api.yaml is GitOps-managed and already applied via
   # ensure_argocd's sync -- never kubectl-applied directly here. Only force
@@ -661,15 +744,7 @@ write_credentials_file() {
   fi
 
   local lan_ip
-  lan_ip="$("$PYTHON_BIN" -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-try:
-    s.connect(('8.8.8.8', 80))
-    print(s.getsockname()[0])
-finally:
-    s.close()
-" 2>/dev/null || echo "<could not detect>")"
+  lan_ip="$(detect_lan_ip)"
 
   echo ""
   log "Bootstrap complete."
@@ -678,6 +753,10 @@ finally:
   echo "Access the platform at:"
   echo "  http://localhost/"
   echo "  http://$lan_ip/   (from another machine on this network)"
+  echo ""
+  echo "Gitea (macro artifact history) at:"
+  echo "  http://localhost:30300/"
+  echo "  http://$lan_ip:30300/   (from another machine on this network)"
 }
 
 main() {

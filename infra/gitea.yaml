@@ -73,22 +73,38 @@ spec:
           persistentVolumeClaim:
             claimName: gitea-data
 ---
-# ClusterIP: reachable from inside the cluster at gitea:3000. Reaching it
-# from the host for this verification step goes through kubectl
-# port-forward instead of changing the Service type -- same pattern as
-# infra/minio.yaml and infra/vault.yaml.
+# M7 (production hardening): NodePort, not ClusterIP -- "View in Gitea"
+# links in the frontend (services/frontend/src/pages/CatalogPage.jsx) are
+# built from GITEA_URL (see infra/backend-api.yaml), which must resolve
+# from an employee's own browser on the LAN, not just from inside the
+# cluster. A Traefik Ingress was considered first (it already fronts
+# backend-api on port 80, see the Ingress in infra/backend-api.yaml) but
+# rejected: Gitea generates absolute links from its own ROOT_URL, so
+# sharing port 80 would need either a host-based Ingress rule (requires a
+# stable DNS name employees don't have) or a path prefix plus
+# GITEA__server__USE_SUB_URL_PATH, which has known rough edges with
+# asset/clone-URL rewriting -- not worth the risk for an internal tool. A
+# dedicated NodePort keeps Gitea serving from its own root path with zero
+# extra config, at the cost of one more port employees' machines must
+# reach (see the fixed nodePort below and the k3d host-port publish in
+# scripts/bootstrap.sh's ensure_cluster()).
+#
+# nodePort is pinned (not left to the 30000-32767 auto-assigned range) so
+# scripts/bootstrap.sh's k3d host-port publish has a fixed target and
+# GITEA_URL (infra/backend-api.yaml) can hardcode the matching port.
 apiVersion: v1
 kind: Service
 metadata:
   name: gitea
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: gitea
   ports:
     - name: http
       port: 3000
       targetPort: 3000
+      nodePort: 30300
     - name: ssh
       port: 22
       targetPort: 22

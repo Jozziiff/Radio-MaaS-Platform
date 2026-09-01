@@ -112,6 +112,17 @@ spec:
               # note). This is an account name, not a secret, so it
               # stays a plain value here rather than a secretKeyRef.
               value: "macros"
+            - name: GITEA_EXTERNAL_URL
+              # Browser-facing Gitea address (see main.py's own comment
+              # on this constant, and infra/gitea.yaml's NodePort
+              # comment for why this isn't the same as gitea_client's
+              # in-cluster GITEA_URL). Placeholder here -- overwritten
+              # with this machine's real LAN IP by
+              # scripts/bootstrap.sh's ensure_backend_api() right before
+              # this manifest is applied, the same way the printed
+              # access URL at the end of that script is detected, not
+              # hardcoded.
+              value: "http://localhost:30300"
             - name: VAULT_TOKEN
               # Vault's real root token from its one-time `vault
               # operator init` (see

@@ -40,6 +40,26 @@ resolve_python() {
   fi
 }
 
+# Confirmed live (a real, load-bearing finding from a security review of
+# this script): `vault kv get secret/x &>/dev/null` alone is NOT a
+# reliable existence check for KV v2. A soft-deleted-then-destroyed secret
+# still returns exit code 0 and prints real metadata output -- only its
+# actual data payload is null. Naively checking the exit code alone
+# misreports a destroyed secret as "present," which is exactly the wrong
+# answer for every check-before-create/inconsistency-detection path in
+# this script. This helper checks the real data payload via JSON, not
+# just whether the command succeeded.
+vault_secret_exists() {
+  vault kv get -format=json "$1" 2>/dev/null | "$PYTHON_BIN" -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    sys.exit(0 if d.get('data', {}).get('data') else 1)
+except Exception:
+    sys.exit(1)
+"
+}
+
 preflight() {
   log "Checking required tools..."
   local tool
@@ -263,16 +283,18 @@ ensure_vault() {
     log "KV engine already enabled at secret/ -- skipping."
   fi
 
-  if ! vault kv get secret/jwt &>/dev/null; then
+  if ! vault_secret_exists secret/jwt; then
     log "Seeding secret/jwt..."
     local jwt_key
     jwt_key="$("$PYTHON_BIN" -c "import secrets; print(secrets.token_hex(32))")"
-    vault kv put secret/jwt signing_key="$jwt_key"
+    # signing_key=- reads from stdin, keeping the generated key out of
+    # vault's own argv (visible via `ps aux` otherwise).
+    printf '%s' "$jwt_key" | vault kv put secret/jwt signing_key=-
   else
     log "secret/jwt already seeded -- skipping."
   fi
 
-  if ! vault kv get secret/minio &>/dev/null; then
+  if ! vault_secret_exists secret/minio; then
     log "Seeding secret/minio..."
     vault kv put secret/minio access_key=devadmin secret_key=devpassword123
   else
@@ -302,7 +324,7 @@ ensure_registry_credentials() {
   export VAULT_TOKEN="$ROOT_TOKEN"
 
   local has_vault_secret=false has_htpasswd=false has_push_secret=false
-  vault kv get secret/registry &>/dev/null && has_vault_secret=true
+  vault_secret_exists secret/registry && has_vault_secret=true
   kubectl get secret registry-htpasswd &>/dev/null && has_htpasswd=true
   kubectl get secret registry-push-secret &>/dev/null && has_push_secret=true
 
@@ -335,20 +357,69 @@ EOF
 
   log "Generating registry credentials..."
   REGISTRY_PASSWORD="$(openssl rand -hex 20)"
-  vault kv put secret/registry username=registry-push password="$REGISTRY_PASSWORD"
+  # password=- reads that one field from stdin rather than argv -- a bare
+  # password="$REGISTRY_PASSWORD" argument would be visible to any other
+  # user on the machine via `ps aux` for the life of the subprocess.
+  # Confirmed live: `vault kv put secret/registry username=registry-push
+  # password=-` with the password piped in round-trips correctly.
+  printf '%s' "$REGISTRY_PASSWORD" | vault kv put secret/registry username=registry-push password=-
 
-  docker run --rm --entrypoint htpasswd httpd:2 -Bbn registry-push "$REGISTRY_PASSWORD" > /tmp/bootstrap-registry.htpasswd
+  # htpasswd's -i flag reads the password from stdin instead of argv
+  # (mutually exclusive with -b, which puts it on the command line -- -i is
+  # the one that keeps it out of argv). -n prints to stdout instead of
+  # writing a file directly, since we want it redirected into our own temp
+  # file with a controlled name/permissions.
+  printf '%s' "$REGISTRY_PASSWORD" | docker run -i --rm --entrypoint htpasswd httpd:2 -Bni registry-push > /tmp/bootstrap-registry.htpasswd
   kubectl create secret generic registry-htpasswd --from-file=htpasswd=/tmp/bootstrap-registry.htpasswd
   rm -f /tmp/bootstrap-registry.htpasswd
 
-  kubectl create secret docker-registry registry-push-secret \
-    --docker-server=registry:5000 \
-    --docker-username=registry-push \
-    --docker-password="$REGISTRY_PASSWORD" \
-    --docker-email=noreply@example.invalid
+  # kubectl create secret has no stdin/file form for --docker-password, so
+  # this one is built as a real dockerconfigjson file instead, keeping the
+  # password out of kubectl's own argv. The password reaches Python via
+  # stdin (not embedded in the -c script string, which would itself be a
+  # visible argv). Python prints the JSON to its own stdout rather than
+  # opening /tmp/... itself and writing there directly -- a native Windows
+  # Python resolves a literal /tmp/... path to C:\tmp\..., a completely
+  # different location from Git-Bash's own /tmp mount, so a cross-tool
+  # write like that silently produces an empty file from bash's point of
+  # view (confirmed live during this exact task). Redirecting Python's
+  # stdout through bash's own `>` keeps the temp file entirely within
+  # bash's consistent view of the filesystem, avoiding that mismatch
+  # regardless of platform. The file is created chmod 600 up front and
+  # removed immediately after use, same reasoning as
+  # write_credentials_file()'s create-before-write ordering.
+  install -m 600 /dev/null /tmp/bootstrap-dockerconfig.json
+  printf '%s' "$REGISTRY_PASSWORD" | "$PYTHON_BIN" -c "
+import json, base64, sys
+password = sys.stdin.read()
+auth = base64.b64encode(f'registry-push:{password}'.encode()).decode()
+config = {'auths': {'registry:5000': {'username': 'registry-push', 'password': password, 'email': 'noreply@example.invalid', 'auth': auth}}}
+json.dump(config, sys.stdout)
+" > /tmp/bootstrap-dockerconfig.json
+  kubectl create secret generic registry-push-secret \
+    --from-file=.dockerconfigjson=/tmp/bootstrap-dockerconfig.json \
+    --type=kubernetes.io/dockerconfigjson
+  rm -f /tmp/bootstrap-dockerconfig.json
 
   kill "$pf_pid" 2>/dev/null || true
   log "Registry credentials created."
+
+  # A real bug caught by live testing: if the registry pod was already
+  # Running from before (mounted the OLD registry-htpasswd Secret), it
+  # doesn't pick up this newly-generated one on its own -- confirmed live,
+  # a docker login against it failed with 401 until the pod was restarted.
+  # Only restart if the pod actually predates this fresh-credential branch
+  # (i.e. we're not on the all-three-already-existed skip path, which
+  # returns before reaching this point).
+  log "Restarting the registry pod so it picks up the new credentials..."
+  kubectl delete pod -l app=registry --ignore-not-found
+  local deadline=$(( $(date +%s) + 60 ))
+  while ! kubectl get pods -l app=registry --no-headers 2>/dev/null | grep -q "1/1.*Running"; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      fail "registry pod did not become Ready within 60 seconds after credential rotation. Check: kubectl describe pod -l app=registry"
+    fi
+    sleep 3
+  done
 }
 
 # Confirmed live against this project's real deployed Gitea (see
@@ -375,7 +446,7 @@ ensure_gitea_account() {
   export VAULT_TOKEN="$ROOT_TOKEN"
 
   local token_in_vault=false
-  vault kv get secret/gitea &>/dev/null && token_in_vault=true
+  vault_secret_exists secret/gitea && token_in_vault=true
 
   if $account_exists && $token_in_vault; then
     log "Gitea 'macros' account and token already set up -- skipping."
@@ -402,9 +473,19 @@ EOF
   fi
 
   log "Creating Gitea account 'macros'..."
+  # ADMIN_PW is piped through kubectl exec's stdin, then read into a
+  # variable inside the remote shell, rather than embedded directly in the
+  # command string -- a bare --password '$ADMIN_PW' here would put the
+  # user's own typed password into `kubectl exec`'s argv on the local
+  # machine (visible via `ps aux` to any other user for the life of the
+  # whole exec round-trip). This narrows the exposure to just the `gitea`
+  # subprocess's own argv inside the pod for the life of that one command --
+  # gitea admin user create has no stdin option for --password itself
+  # (confirmed against its real --help output), so that inner exposure is a
+  # genuine limit of the tool, not something scriptable around further.
   local create_output
-  create_output="$(kubectl exec "$gitea_pod" -- su git -c \
-    "gitea admin user create --username macros --password '$ADMIN_PW' --email macros@radio-maas.local --admin --access-token --access-token-name radio-maas-backend --access-token-scopes 'write:repository,write:user,read:repository,read:user'")"
+  create_output="$(printf '%s' "$ADMIN_PW" | kubectl exec -i "$gitea_pod" -- su git -c \
+    'IFS= read -r GITEA_PW; gitea admin user create --username macros --password "$GITEA_PW" --email macros@radio-maas.local --admin --access-token --access-token-name radio-maas-backend --access-token-scopes "write:repository,write:user,read:repository,read:user"')"
 
   local gitea_token
   gitea_token="$(echo "$create_output" | grep -oP '(?<=successfully created\.\.\. )\S+' || true)"
@@ -437,6 +518,12 @@ ensure_backend_api() {
   pf_pid=$!
   sleep 2
 
+  # Log out first: a stale cached credential from a prior run (e.g. before
+  # a credential rotation) can make a fresh `docker login` behave
+  # unpredictably against Docker's local credential store -- confirmed
+  # live, a real password mismatch this way. Logging out first guarantees
+  # this login attempt starts clean.
+  docker logout host.docker.internal:5000 &>/dev/null || true
   echo "$REGISTRY_PASSWORD" | docker login host.docker.internal:5000 -u registry-push --password-stdin
   docker tag registry:5000/backend-api:latest host.docker.internal:5000/backend-api:latest
   docker push host.docker.internal:5000/backend-api:latest
@@ -487,10 +574,13 @@ set_admin_password() {
   if echo "$login_response" | grep -q "access_token"; then
     local default_token
     default_token="$(echo "$login_response" | "$PYTHON_BIN" -c "import json,sys; print(json.load(sys.stdin)['access_token'])")"
-    curl -s -X PUT http://localhost:8000/users/1 \
+    # -d @- reads the request body from stdin instead of argv -- a bare
+    # -d "{...$ADMIN_PW...}" would put the user's own typed password into
+    # curl's argv, visible via `ps aux` to any other user on the machine.
+    printf '{"password":"%s"}' "$ADMIN_PW" | curl -s -X PUT http://localhost:8000/users/1 \
       -H "Authorization: Bearer $default_token" \
       -H "Content-Type: application/json" \
-      -d "{\"password\":\"$ADMIN_PW\"}" > /dev/null
+      -d @- > /dev/null
     log "Platform admin password set to the one you entered."
   else
     log "Default admin login failed -- assuming the real password is already set. Skipping."
@@ -534,6 +624,14 @@ write_credentials_file() {
   local creds_file="$REPO_ROOT/.env.bootstrap-credentials"
   log "Writing generated credentials to $creds_file..."
 
+  # Create with restrictive permissions BEFORE writing any content -- doing
+  # `chmod 600` only after the write leaves a real (if narrow) window on a
+  # genuinely multi-user machine where the file exists at the process's
+  # default umask (often 644, world-readable) before being tightened.
+  # `install` creates-or-truncates atomically with the given mode, so no
+  # such window exists.
+  install -m 600 /dev/null "$creds_file"
+
   {
     echo "# Generated by scripts/bootstrap.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "# Never commit this file -- already covered by .gitignore's .env.* pattern."
@@ -546,7 +644,21 @@ write_credentials_file() {
     echo "GITEA_USERNAME=macros"
     echo "# Platform admin / Gitea password: the one you entered at the prompt -- not written here."
   } > "$creds_file"
-  chmod 600 "$creds_file"
+
+  # Verify the restrictive mode actually stuck -- don't just claim it in the
+  # log line. On a filesystem/platform where POSIX permission bits aren't
+  # meaningful (e.g. some Windows filesystems), this check itself can't
+  # succeed either; warn rather than silently asserting a security property
+  # that may not hold.
+  local actual_perms
+  actual_perms="$(stat -c '%a' "$creds_file" 2>/dev/null || stat -f '%Lp' "$creds_file" 2>/dev/null || echo "unknown")"
+  if [ "$actual_perms" = "600" ]; then
+    log "Credentials file permissions confirmed: 600 (owner read/write only)."
+  else
+    log "WARNING: could not confirm 600 permissions on $creds_file (got: $actual_perms)."
+    log "WARNING: this can happen on filesystems without POSIX permission bits (e.g. some Windows setups)."
+    log "WARNING: on a real Linux deployment target, verify this manually: ls -la $creds_file"
+  fi
 
   local lan_ip
   lan_ip="$("$PYTHON_BIN" -c "

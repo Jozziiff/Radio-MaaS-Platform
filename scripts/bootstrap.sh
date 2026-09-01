@@ -243,6 +243,27 @@ ensure_argocd() {
 
 ensure_minio_buckets() {
   log "Seeding MinIO buckets..."
+
+  # Wait for the pod itself, not just a fixed sleep after the
+  # port-forward: ensure_argocd() only waits for the Application to be
+  # Synced (manifests applied), not Healthy (pods actually Running) --
+  # deliberately, see ensure_argocd()'s own comment -- so on a genuinely
+  # fresh cluster this function can otherwise run before the MinIO pod
+  # has even been scheduled. Confirmed live: `kubectl port-forward`
+  # against a not-yet-ready pod still opens a local listener without
+  # erroring, but every actual connection through it fails with
+  # "connection refused" -- a real regression this project's own testing
+  # caught only by running the committed script unattended end-to-end,
+  # not by reading the code.
+  log "Waiting for the MinIO pod to be Ready (timeout 2m)..."
+  local deadline=$(( $(date +%s) + 120 ))
+  while ! kubectl get pods -l app=minio --no-headers 2>/dev/null | grep -q "1/1.*Running"; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      fail "MinIO pod did not become Ready within 2 minutes. Check: kubectl describe pod -l app=minio"
+    fi
+    sleep 3
+  done
+
   local pf_pid
   kubectl port-forward svc/minio 9000:9000 &>/tmp/bootstrap-minio-pf.log &
   pf_pid=$!
@@ -274,6 +295,21 @@ $output"
 # during this project's own live Task 6 re-bootstrap.
 ensure_vault() {
   log "Checking Vault..."
+
+  # Same readiness gap as ensure_minio_buckets() -- ensure_argocd() only
+  # waits for Synced, not Healthy, so on a fresh cluster the Vault pod may
+  # not be Running yet when this function starts. kubectl exec against a
+  # not-yet-ready pod fails hard (unlike port-forward's silent-then-
+  # refused behavior), so this matters here too.
+  log "Waiting for the Vault pod to be Ready (timeout 2m)..."
+  local deadline=$(( $(date +%s) + 120 ))
+  while ! kubectl get pods -l app=vault --no-headers 2>/dev/null | grep -q "2/2.*Running"; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      fail "Vault pod did not become Ready within 2 minutes. Check: kubectl describe pod -l app=vault"
+    fi
+    sleep 3
+  done
+
   local pf_pid
   kubectl port-forward svc/vault 8200:8200 &>/tmp/bootstrap-vault-pf.log &
   pf_pid=$!
@@ -481,6 +517,19 @@ json.dump(config, sys.stdout)
 # and mints a scoped token in one command, no browser needed.
 ensure_gitea_account() {
   log "Checking Gitea account 'macros'..."
+
+  # Same readiness gap named in ensure_minio_buckets()/ensure_vault() --
+  # ensure_argocd() only waits for Synced, not Healthy. kubectl exec
+  # against a not-yet-ready pod fails hard.
+  log "Waiting for the Gitea pod to be Ready (timeout 2m)..."
+  local deadline=$(( $(date +%s) + 120 ))
+  while ! kubectl get pods -l app=gitea --no-headers 2>/dev/null | grep -q "1/1.*Running"; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      fail "Gitea pod did not become Ready within 2 minutes. Check: kubectl describe pod -l app=gitea"
+    fi
+    sleep 3
+  done
+
   local gitea_pod
   gitea_pod="$(kubectl get pods -l app=gitea -o jsonpath='{.items[0].metadata.name}')"
 
@@ -562,15 +611,21 @@ print(text[idx + len(marker):].split()[0])
 $create_output"
   fi
 
-  # Binary-safe write (printf, not echo) -- a text-mode write here left a
-  # trailing \r in a prior live run that corrupted an HTTP header
-  # downstream (see docs/decisions/017).
-  printf '%s' "$gitea_token" > /tmp/bootstrap-gitea-token.tmp
-  kubectl cp /tmp/bootstrap-gitea-token.tmp "default/$gitea_pod:/tmp/bootstrap-gitea-token.tmp"
-  kubectl exec deploy/vault -c vault -- sh -c \
-    "export VAULT_ADDR=http://127.0.0.1:8200; export VAULT_TOKEN=$ROOT_TOKEN; vault kv put secret/gitea token=\$(cat /tmp/bootstrap-gitea-token.tmp)"
-  kubectl exec "$gitea_pod" -- rm -f /tmp/bootstrap-gitea-token.tmp
-  rm -f /tmp/bootstrap-gitea-token.tmp
+  # Piped straight into Vault's pod via stdin, not `kubectl cp` -- a real
+  # bug found only by running this exact script unattended end-to-end on
+  # Windows/Git-Bash: `kubectl cp`'s local-side argument needs Git-Bash's
+  # automatic Unix-path-to-Windows-path conversion to find the file this
+  # process actually wrote, but its remote-side argument (after the `:`)
+  # must NOT be converted -- `kubectl cp` can't satisfy both with the
+  # conversion setting fixed one way for the whole process, and failed
+  # outright ("error: one of src or dest must be a local file
+  # specification") every time. Piping through stdin sidesteps the whole
+  # local-path question -- nothing about the token's path is ever passed
+  # as a `kubectl` argument at all. Also binary-safe (printf, not echo) --
+  # a text-mode write previously left a trailing \r that corrupted an HTTP
+  # header downstream (see docs/decisions/017).
+  printf '%s' "$gitea_token" | kubectl exec -i deploy/vault -c vault -- sh -c \
+    "export VAULT_ADDR=http://127.0.0.1:8200; export VAULT_TOKEN=$ROOT_TOKEN; IFS= read -r TOKEN; vault kv put secret/gitea token=\"\$TOKEN\""
 
   kill "$pf_pid" 2>/dev/null || true
   log "Gitea account and token created."

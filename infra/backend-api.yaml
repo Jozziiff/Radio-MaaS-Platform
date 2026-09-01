@@ -116,13 +116,28 @@ spec:
               # Browser-facing Gitea address (see main.py's own comment
               # on this constant, and infra/gitea.yaml's NodePort
               # comment for why this isn't the same as gitea_client's
-              # in-cluster GITEA_URL). Placeholder here -- overwritten
-              # with this machine's real LAN IP by
-              # scripts/bootstrap.sh's ensure_backend_api() right before
-              # this manifest is applied, the same way the printed
-              # access URL at the end of that script is detected, not
-              # hardcoded.
-              value: "http://localhost:30300"
+              # in-cluster GITEA_URL) -- genuinely per-machine (each
+              # colleague's install has a different LAN IP), so it can't
+              # be a literal value in this GitOps-managed manifest the
+              # way GITEA_USERNAME above is. A first attempt tried
+              # `kubectl set env` on the live Deployment after bootstrap
+              # -- confirmed live that this doesn't work: ArgoCD's
+              # selfHeal (infra/argocd-app.yaml) treats that as drift
+              # from what's committed here and reverts it, sometimes
+              # within the same bootstrap run. Sourced from a ConfigMap
+              # instead -- ArgoCD only owns "read this key from this
+              # ConfigMap", not the value itself, so there's nothing for
+              # selfHeal to revert. scripts/bootstrap.sh's
+              # ensure_gitea_external_url_configmap() creates/updates
+              # backend-api-gitea-url (kubectl apply, not Git-tracked)
+              # with this machine's real LAN IP, before ArgoCD's first
+              # sync -- same "credential-shaped value the script manages
+              # outside Git" pattern as vault-unseal-key's Secret below,
+              # just a ConfigMap since this isn't a secret.
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-api-gitea-url
+                  key: url
             - name: VAULT_TOKEN
               # Vault's real root token from its one-time `vault
               # operator init` (see

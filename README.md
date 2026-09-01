@@ -531,9 +531,24 @@ docker push registry:5000/backend-api:latest
 ```
 
 `infra/backend-api.yaml` is picked up automatically by the existing
-ArgoCD Application (step 2) — no manual `kubectl apply` needed. Once the
-pod is `Running`, reach it the same way other in-cluster services are
-reached for testing:
+ArgoCD Application (step 2) — no manual `kubectl apply` needed. It does
+need one thing ArgoCD can't provide: a `backend-api-gitea-url` ConfigMap
+holding this machine's real LAN IP, referenced by the manifest's
+`GITEA_EXTERNAL_URL` env var. This can't be a literal value in the
+manifest (it's genuinely per-machine), and `kubectl set env` on the live
+Deployment gets silently reverted by ArgoCD's own `selfHeal` — confirmed
+live. Create it once per machine before the pod first starts:
+
+```bash
+kubectl create configmap backend-api-gitea-url \
+  --from-literal=url="http://<this-machine-LAN-IP>:30300" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+(`scripts/bootstrap.sh`'s `ensure_gitea_external_url_configmap()` does
+this automatically, detecting the LAN IP itself, if you're using the
+script instead of this manual sequence.) Once the pod is `Running`,
+reach it the same way other in-cluster services are reached for testing:
 
 ```bash
 kubectl port-forward svc/backend-api 8000:8000

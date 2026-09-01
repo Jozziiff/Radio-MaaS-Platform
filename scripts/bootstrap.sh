@@ -197,6 +197,33 @@ ensure_cluster() {
     -p "30300:30300@server:0"
 }
 
+# infra/backend-api.yaml reads GITEA_EXTERNAL_URL from this ConfigMap
+# (configMapKeyRef), not a literal value -- see that manifest's own
+# comment for why: the value is genuinely per-machine (each colleague's
+# LAN IP differs), but ArgoCD's selfHeal (infra/argocd-app.yaml) reverts
+# any live drift from what's committed in Git. A ConfigMap this script
+# manages directly, outside Git, sidesteps that entirely -- confirmed
+# live that a bare `kubectl set env` on the Deployment itself gets
+# silently reverted by ArgoCD's own reconcile loop, sometimes within the
+# same bootstrap run. Created before ensure_argocd() so the Deployment
+# never even transiently references a missing ConfigMap once ArgoCD
+# applies it (Kubernetes doesn't validate configMapKeyRef existence at
+# apply time, but there's no reason to leave the gap open).
+ensure_gitea_external_url_configmap() {
+  log "Setting Gitea's external URL for this machine..."
+  local lan_ip url
+  lan_ip="$(detect_lan_ip)"
+  if [ "$lan_ip" = "<could not detect>" ]; then
+    log "WARNING: could not detect this machine's LAN IP -- GITEA_EXTERNAL_URL will default to http://localhost:30300, which only works from a browser on this same machine. Fix later with: kubectl create configmap backend-api-gitea-url --from-literal=url=http://<this-machine-LAN-IP>:30300 --dry-run=client -o yaml | kubectl apply -f -"
+    url="http://localhost:30300"
+  else
+    url="http://$lan_ip:30300"
+  fi
+
+  kubectl create configmap backend-api-gitea-url --from-literal=url="$url" \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
+
 ensure_argocd() {
   log "Checking for ArgoCD..."
   if ! kubectl get namespace argocd &>/dev/null; then
@@ -652,21 +679,12 @@ ensure_backend_api() {
 
   kill "$pf_pid" 2>/dev/null || true
 
-  # infra/backend-api.yaml's GITEA_EXTERNAL_URL default (localhost:30300)
-  # only resolves from a browser on this same machine -- set it to this
-  # machine's real LAN IP on the *live* Deployment so "View in Gitea"
-  # links work from a colleague's own browser too. `kubectl set env`, not
-  # an edit to the manifest itself: infra/backend-api.yaml is GitOps-managed
-  # (applied via ensure_argocd's sync, never kubectl-applied directly here)
-  # -- editing the checked-in YAML with a machine-specific IP would drift
-  # from git and get silently reverted on ArgoCD's next sync anyway.
-  local lan_ip
-  lan_ip="$(detect_lan_ip)"
-  if [ "$lan_ip" != "<could not detect>" ]; then
-    kubectl set env deployment/backend-api "GITEA_EXTERNAL_URL=http://$lan_ip:30300"
-  else
-    log "WARNING: could not detect this machine's LAN IP -- GITEA_EXTERNAL_URL left at its http://localhost:30300 default, which only works from a browser on this same machine. Set it manually: kubectl set env deployment/backend-api GITEA_EXTERNAL_URL=http://<this-machine-LAN-IP>:30300"
-  fi
+  # GITEA_EXTERNAL_URL itself is already set correctly by
+  # ensure_gitea_external_url_configmap() (run earlier in main(), before
+  # ArgoCD's first sync) -- see that function and infra/backend-api.yaml's
+  # own comment for why it's a ConfigMap the script manages directly
+  # rather than a live `kubectl set env` (which ArgoCD's selfHeal would
+  # just revert).
 
   # infra/backend-api.yaml is GitOps-managed and already applied via
   # ensure_argocd's sync -- never kubectl-applied directly here. Only force
@@ -819,6 +837,7 @@ main() {
   preflight_registry_auth
   prompt_admin_password
   ensure_cluster
+  ensure_gitea_external_url_configmap
   ensure_argocd
   ensure_minio_buckets
   ensure_vault

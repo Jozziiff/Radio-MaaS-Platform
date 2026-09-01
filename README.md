@@ -96,31 +96,65 @@ For the full mission, roadmap, and background context, see
 
 ## Prerequisites
 
-- [Docker](https://www.docker.com/)
+- [Docker](https://www.docker.com/) — Desktop or native Engine, either
+  works; `scripts/bootstrap.sh` detects which one you have and handles
+  each differently (see its preflight step)
 - [k3d](https://k3d.io/)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [Python 3.11+](https://www.python.org/)
-- [Node.js](https://nodejs.org/) (no specific version pinned anywhere in
-  the repo; a current LTS works)
-- [mc](https://min.io/docs/minio/linux/reference/minio-mc.html) (the MinIO
-  client), or `docker run minio/mc` if you don't want it installed locally
+- [Python 3.11+](https://www.python.org/) (as `python3` or `python` on
+  your PATH)
+- [Node.js](https://nodejs.org/) (only needed for local frontend dev —
+  `npm run dev`, not for the bootstrap script itself, which builds the
+  frontend inside a container)
 
 ## Getting started
 
-This is the real, ordered sequence from an empty clone to a working app,
-traced from the actual manifests and startup code — not a simplified
-version of it.
+Run the bootstrap script from a clean clone:
 
-### 1. Create the cluster
+```bash
+bash scripts/bootstrap.sh
+```
 
-For a **brand-new** cluster, pass four flags together:
+It asks you **one thing** — a password, typed twice to confirm, at least
+12 characters. That becomes both the platform admin's login and Gitea's
+account login (a deliberate simplification — see
+[018-bootstrap-script-simplifications.md](docs/decisions/018-bootstrap-script-simplifications.md)
+for why one shared password is an acceptable trade-off here, and when to
+revisit it). Every other credential is generated automatically and
+written to a local, gitignored `.env.bootstrap-credentials` file.
+
+It creates the k3d cluster, installs ArgoCD, seeds MinIO's buckets,
+initializes and unseals Vault, generates the registry credential trio,
+creates Gitea's account and token, builds and pushes `backend-api`'s
+image, sets the admin password, and runs a final health-check pass —
+then prints the URL to open. It's safe to re-run at any point: every
+step checks whether its own work is already done before doing it, so a
+partial failure can be fixed and the script re-run from the top rather
+than requiring manual cleanup.
+
+See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the five-minute version
+of this same path.
+
+### What the script actually does — manual reference for troubleshooting
+
+The steps below are what `scripts/bootstrap.sh` automates, kept here as
+a reference for understanding what's happening under the hood, or for
+running one piece by hand if something needs manual recovery (see
+[docs/RUNBOOK.md](docs/RUNBOOK.md) for symptom-driven troubleshooting).
+**Don't follow this as the primary path** — the script above is faster
+and less error-prone for actually standing the platform up.
+
+#### 1. Create the cluster
+
+For a **brand-new** cluster, pass five flags together:
 
 ```bash
 k3d cluster create radio-maas \
   --registry-config infra/registries.yaml \
   --host-alias 10.43.99.99:registry \
   -p "80:80@loadbalancer" \
-  -p "443:443@loadbalancer"
+  -p "443:443@loadbalancer" \
+  -p "30300:30300@server:0"
 ```
 
 - `--registry-config infra/registries.yaml` makes containerd trust the
@@ -158,6 +192,14 @@ k3d cluster create radio-maas \
   [014](docs/decisions/014-registry-dns-durable-fix.md) for the same class
   of limitation) and cannot be added retroactively to an already-running
   cluster.
+- `-p "30300:30300@server:0"` publishes Gitea's fixed NodePort
+  (`infra/gitea.yaml`) straight from the server node, not through
+  Traefik's LoadBalancer — Gitea generates absolute links from its own
+  configured address, and sharing Traefik's port 80 would need Gitea's
+  own subpath rewriting (`ROOT_URL`/`USE_SUB_URL_PATH`), which has real
+  rough edges and isn't worth the risk for an internal tool. See
+  `infra/gitea.yaml`'s own comment for the full reasoning. Same
+  creation-time-only constraint as the two flags above.
 
 If you already have an **existing** cluster without `infra/registries.yaml`
 applied yet, see "Applying `infra/registries.yaml` to an existing cluster"
@@ -166,7 +208,7 @@ recreating the cluster**, unlike the `--host-alias` DNS fix above (see
 [RUNBOOK.md](docs/RUNBOOK.md)'s symptom table for both failure modes and
 which fix each one needs).
 
-### 2. Bootstrap ArgoCD, then let it take over `infra/`
+#### 2. Bootstrap ArgoCD, then let it take over `infra/`
 
 Most of what's in `infra/` (MinIO, Vault, Gitea) is **GitOps-managed** —
 once ArgoCD's `Application` (`infra/argocd-app.yaml`) is applied, ArgoCD
@@ -181,17 +223,22 @@ kubectl apply -n argocd --server-side --force-conflicts \
   -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
 kubectl apply -f infra/argocd-app.yaml -n argocd
-kubectl get application -n argocd   # wait for radio-maas-infra to show Synced / Healthy
+kubectl get application -n argocd   # wait for radio-maas-infra to show Synced
 ```
 
 > `--server-side --force-conflicts` is required for the ArgoCD install
 > specifically — its `applicationsets.argoproj.io` CRD is too large for
 > plain client-side `kubectl apply`.
 
-Once `radio-maas-infra` is `Synced`/`Healthy`, MinIO, Vault, and Gitea are
-all running in the cluster.
+Once `radio-maas-infra` is `Synced`, MinIO, Vault, and Gitea are all
+running in the cluster. **Don't wait for `Healthy` too** on a genuinely
+fresh cluster — `registry` and `backend-api` can't go `Healthy` until
+later steps below supply the registry credential and a built image;
+`scripts/bootstrap.sh` itself only waits for `Synced` for exactly this
+reason (confirmed live: waiting for `Healthy` here deadlocks for the
+full wait timeout on a fresh cluster with nothing seeded yet).
 
-### 3. Seed MinIO's buckets
+#### 3. Seed MinIO's buckets
 
 MinIO's data volume is an `emptyDir` — it starts empty every time the pod
 does, so the two buckets macros use need to be created after every fresh
@@ -207,7 +254,7 @@ docker run --rm --entrypoint sh minio/mc -c "
 "
 ```
 
-### 4. Seed Vault's secrets — **one-time per fresh Vault instance, not every restart**
+#### 4. Seed Vault's secrets — **one-time per fresh Vault instance, not every restart**
 
 As of M7, Vault runs with real raft (integrated storage) persistence
 and a 1-of-1 Shamir seal auto-unsealed by a sidecar
@@ -273,7 +320,7 @@ way any time you need it:
 export VAULT_TOKEN=$(kubectl get secret vault-unseal-key -o jsonpath='{.data.root_token}' | base64 -d)
 ```
 
-### 4b. Seed the registry credential — **required on every fresh cluster**
+#### 4b. Seed the registry credential — **required on every fresh cluster**
 
 `infra/registry.yaml` (the in-cluster image registry Kaniko pushes built
 macro images to, and execution Jobs pull them from — see
@@ -320,7 +367,7 @@ must be regenerated together from the same password — if you re-seed
 Secrets to match, builds and pulls will fail with a registry `401`. See
 [RUNBOOK.md](RUNBOOK.md)'s symptom table.
 
-### 4c. Seed the Gitea access token in Vault — **required on every fresh cluster**
+#### 4c. Seed the Gitea access token in Vault — **required on every fresh cluster**
 
 The Gitea access token generated in step 5 below is one credential with
 two consumers: the Kaniko build Job's own git clone step, and
@@ -337,7 +384,7 @@ vault kv put secret/gitea token="<the same Gitea access token from step 5>"
 (Seed this after completing step 5 below, once that token exists — listed
 here only to keep it next to the other one-time Vault-seeding steps.)
 
-### 4d. Applying `infra/registries.yaml` to an existing cluster
+#### 4d. Applying `infra/registries.yaml` to an existing cluster
 
 Two *separate* problems can prevent Kaniko/execution Jobs from reaching
 the registry — don't conflate them, but as of
@@ -402,32 +449,41 @@ that costs nothing to keep) — but it's no longer load-bearing for the
 registry specifically. A fresh cluster created **without** it will still
 resolve the registry correctly through the `mirrors.endpoint` fix above.
 
-### 5. Set up Gitea — manual, can't be scripted
+#### 5. Set up Gitea
 
 Gitea (`infra/gitea.yaml`) comes up with `INSTALL_LOCK=true`, so it skips
-the interactive first-run page, but creating an account and an API token
-still has to happen through its web UI — there's no API for the very first
-account on a fresh instance.
+the interactive first-run page, but a fresh instance still has no
+account and no API token yet — Gitea has no API for creating the very
+first account, since there's nothing to authenticate as. There's no web
+UI dependency, though: Gitea's own CLI creates an admin account and
+mints a scoped access token in one command (confirmed against the real
+`gitea admin user create --help` output, not just the public docs, which
+omit some of the flags used here), and this is exactly what
+`scripts/bootstrap.sh`'s `ensure_gitea_account()` runs:
 
 ```bash
-kubectl port-forward svc/gitea 3000:3000 &
+GITEA_POD=$(kubectl get pods -l app=gitea -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -i "$GITEA_POD" -- su git -c \
+  'gitea admin user create --username macros --password "<your password>" \
+   --email macros@radio-maas.local --admin --access-token \
+   --access-token-name radio-maas-backend \
+   --access-token-scopes "write:repository,write:user,read:repository,read:user"'
 ```
 
-1. Open http://localhost:3000, register the first account (it becomes the
-   Gitea admin automatically).
-2. In that account's Settings → Applications, generate an access token
-   with repo read/write scope.
-3. Export the account name, and seed the token into Vault (step 4c above)
-   — `backend-api` reads the token from `secret/gitea`, not from an env
-   var:
+(The bootstrap script pipes the password through stdin rather than
+embedding it in the command string, to avoid it showing up in a process
+listing — see the script's own comment on `ensure_gitea_account()` for
+why.) The single-account choice (`macros` is both the human-facing admin
+and the identity `backend-api` uses to push every macro's build
+artifacts) is deliberate — see
+[018-bootstrap-script-simplifications.md](docs/decisions/018-bootstrap-script-simplifications.md).
+
+Then seed the printed token into Vault (step 4c above) — `backend-api`
+reads it from `secret/gitea`, not from an env var:
 
 ```bash
-export GITEA_URL=http://localhost:3000
-export GITEA_USERNAME=<the account you just created>
+vault kv put secret/gitea token="<the printed token>"
 ```
-
-Then go back and run step 4c's `vault kv put secret/gitea token=...` with
-the token you just generated, if you haven't already.
 
 If you skip this step, macro builds will **fail**: since M7, Kaniko
 builds directly from the macro's Gitea repo, so the Gitea push is a
@@ -435,7 +491,14 @@ required build dependency, not best-effort — a push failure fails the
 whole build request with a `422` (see
 [008-kaniko-instead-of-docker-socket.md](docs/decisions/008-kaniko-instead-of-docker-socket.md)).
 
-### 6. Run the backend
+**Gitea cannot re-display an existing token's value.** If the account
+already exists but no token is in Vault, don't guess whether generating
+a new one is safe — check first (`vault kv get secret/gitea` shows
+whether one's already recorded), and if not, generate a fresh one with
+`gitea admin user generate-access-token` instead of `user create` (which
+would fail — the account already exists).
+
+#### 6. Run the backend
 
 ```bash
 python -m venv .venv
@@ -476,7 +539,7 @@ reached for testing:
 kubectl port-forward svc/backend-api 8000:8000
 ```
 
-### 7. Run the frontend
+#### 7. Run the frontend
 
 ```bash
 cd services/frontend
@@ -486,12 +549,33 @@ npm run dev
 
 Open http://localhost:5173.
 
-### 8. First login
+#### 8. First login
 
-The dev admin account is hardcoded (`services/backend-api/auth.py`):
+As of M7, there's no hardcoded password any more — `admin` is a real
+account whose password is whatever `scripts/bootstrap.sh`'s
+`set_admin_password()` set it to (the same password entered at the
+script's one interactive prompt). If you're following this manual
+sequence instead of running the script, the account still starts at the
+old dev default (`devpassword123`) until something sets it — see
+[013-per-user-accounts.md](docs/decisions/013-per-user-accounts.md).
 
-- **Username:** `admin`
-- **Password:** `devpassword123`
+## Network requirements
+
+Two ports need to be reachable from an employee's own machine on the
+LAN — nothing else:
+
+| Port | What it's for | Confirmed via |
+|---|---|---|
+| **80** | The platform itself — frontend + API, through Traefik's `Ingress` (`infra/backend-api.yaml`, no `host:` field, so it accepts a request addressed to any hostname/IP) | `k3d cluster create`'s `-p "80:80@loadbalancer"` flag, live-verified from a second physical machine on the same network — see [017](docs/decisions/017-network-reachability-task6-live-verification.md) |
+| **30300** | Gitea's "View in Gitea" links (a nice-to-have — browsing a macro's build history — not required for the platform's core function) | `k3d cluster create`'s `-p "30300:30300@server:0"` flag, live-verified the same way as port 80 |
+
+Port 443 is also published (`-p "443:443@loadbalancer"`) but unused —
+there's no TLS certificate configured, so nothing currently listens on
+it meaningfully. Every other service (MinIO, Vault, the in-cluster
+registry) is `ClusterIP`-only and was never meant to be reached directly
+from outside the cluster — `scripts/bootstrap.sh` and this README's
+manual reference both reach them via `kubectl port-forward` for
+setup/debugging, not for day-to-day employee use.
 
 ## Verifying it's working
 
@@ -502,11 +586,11 @@ wrong."
 | Check | Command | Expect |
 |---|---|---|
 | Cluster is up | `k3d cluster list` | `radio-maas` listed, `1/1` servers |
-| Infra synced via ArgoCD | `kubectl get application radio-maas-infra -n argocd` | `SYNC STATUS Synced`, `HEALTH STATUS Healthy` |
+| Infra synced via ArgoCD | `kubectl get application radio-maas-infra -n argocd` | `SYNC STATUS Synced` (don't require `Healthy` too on a fresh cluster — see "Getting started, step 2" above) |
 | MinIO is up | `kubectl get pods -l app=minio` | `STATUS Running`, `1/1` |
 | Vault is up and unsealed | `kubectl exec deploy/vault -- vault status` (or `curl http://localhost:8200/v1/sys/health` with a port-forward) | `Sealed: false` |
 | Gitea is up | `kubectl get pods -l app=gitea` | `STATUS Running`, `1/1` |
-| Gitea is reachable | `curl -o /dev/null -w '%{http_code}' http://localhost:3000` (with a port-forward) | `200` |
+| Gitea is reachable | `curl -o /dev/null -w '%{http_code}' http://localhost:30300` (no port-forward needed — Gitea's NodePort is published to the host, see "Network requirements" below) | `200` |
 | API is up | `curl localhost:8000/docs` | HTML page (Swagger UI), not a connection error |
 | Login works | `curl -X POST localhost:8000/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"devpassword123"}'` | `200`, `{"access_token": "..."}` |
 | Image was built and pushed | `curl -s -u "registry-push:$REGISTRY_PASSWORD" http://localhost:5000/v2/<macro_name>/tags/list` (with `kubectl port-forward svc/registry 5000:5000` running) | `{"name":"<macro_name>","tags":["generated"]}` |
@@ -617,14 +701,19 @@ returns `422`, as `{"detail": {"error": "build_failed", "message": ...}}`.
     "image_tag": "registry:5000/rtwp-anomaly-demo:generated",
     "built_at": "2026-08-17T16:45:27+00:00",
     "updated_at": "2026-08-17T16:45:27+00:00",
-    "gitea_repo_url": "http://localhost:3000/admin/rtwp-anomaly-demo"
+    "gitea_repo_url": "http://192.168.1.42:30300/macros/rtwp-anomaly-demo"
   }
 ]
 ```
 
 `GET /macros/{technical_name}` returns this same shape for one macro, plus
 `source_code`. `gitea_repo_url` is `null` if the macro predates the Gitea
-mirror or the mirror push has never succeeded for it.
+mirror or the mirror push has never succeeded for it. As of M7, it's built
+from `GITEA_EXTERNAL_URL` (`infra/backend-api.yaml`), a LAN-reachable
+address — deliberately distinct from `gitea_client.py`'s own `GITEA_URL`,
+which stays the in-cluster Service address `backend-api` itself uses to
+talk to Gitea server-side. See `infra/gitea.yaml`'s comment on why Gitea
+gets a dedicated NodePort instead of sharing backend-api's Ingress.
 
 ### `POST /executions/{macro_name}` — response body
 
@@ -693,17 +782,18 @@ Full interactive docs at `/docs` (Swagger) once the server is running.
 radio-maas-platform/
 ├── docs/
 │   ├── brief/            internship brief & living roadmap notes (local only, gitignored)
-│   └── decisions/         one write-up per milestone/decision: what, why, what's left out
+│   ├── decisions/         one write-up per milestone/decision: what, why, what's left out
+│   ├── RUNBOOK.md         day-to-day running/debugging reference
+│   └── QUICKSTART.md      five-minute cold-start guide
 ├── infra/                  k3d/Kubernetes manifests (MinIO, Vault, Gitea,
 │                             the in-cluster registry, backend-api, ArgoCD Application)
-├── macros/                  sample macro scripts used to develop/test the pipeline
-├── data/                    local scratch input/output files from early manual runs
-├── scripts/                 placeholder for future dev/setup helper scripts (currently empty)
+├── macros/                  the five real onboarded macro scripts
+├── scripts/
+│   └── bootstrap.sh          single-command platform bootstrap (see "Getting started")
 └── services/
     ├── backend-api/            FastAPI service: analyze / build / execute / auth / registry
     │   └── templates/              static MinIO wrapper, copied into every generated image
-    ├── frontend/                React + Vite + Tailwind web UI
-    └── macro-operator/          kopf-based controller (not started, later milestone)
+    └── frontend/                React + Vite + Tailwind web UI
 ```
 
 ## Documentation
@@ -716,6 +806,8 @@ radio-maas-platform/
   symptom table, per-layer verification commands, and common recovery
   actions (re-seeding Vault, recreating MinIO's buckets, recovering a
   stranded k3d cluster)
+- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — the five-minute version of
+  "Getting started" above, for someone who just wants it running
 
 ## Running tests
 
@@ -737,29 +829,11 @@ Frontend changes are currently verified manually against the running app.
 
 ## Known limitations
 
-- **Vault is now PVC-backed, no longer the exception.** As of M7, Vault
-  runs with real raft (integrated storage) persistence and a 1-of-1
-  Shamir seal, auto-unsealed by a sidecar reading a Kubernetes Secret —
-  no more `-dev` mode, no more re-seeding every secret on every pod
-  restart (see
-  [Getting started, step 4](#4-seed-vaults-secrets--one-time-per-fresh-vault-instance-not-every-restart)
-  for the one-time init sequence). `backend-api`, MinIO, Gitea, and the
-  in-cluster registry are all PVC-backed as of M7 the same way. The
-  1-of-1 seal and using the root token as `backend-api`'s standing
-  credential are both **deliberate, named simplifications**, not
-  oversights — see
-  [012-vault-simplified-unseal.md](docs/decisions/012-vault-simplified-unseal.md)
-  for the full trade-off reasoning and the explicit conditions under
-  which each should be revisited. (Superseded:
-  [003-vault-secret-management-simplifications.md](docs/decisions/003-vault-secret-management-simplifications.md)
-  documented the earlier `-dev`-mode-only state.)
-  **Caveat that applies to Vault the same as MinIO/Gitea/the registry:**
-  the PVCs use k3d's `local-path` storage class, which stores data on
-  the node container's own filesystem — a full `k3d cluster
-  delete`/`create` (not just a pod restart) still loses everything,
-  since the node itself is gone, including Vault's raft data. See
-  [docs/RUNBOOK.md](docs/RUNBOOK.md)'s "Recover a stranded k3d cluster"
-  for the full re-seeding checklist that requires.
+Most of the limitations that used to be listed here — dev-mode Vault, no
+persistence, a single shared admin login, no reachability beyond
+`localhost` — are the ones M7 (this current phase) exists to close, and
+are now resolved. What's left, honestly:
+
 - **No registry-side image cleanup.** `DELETE /macros/{technical_name}`
   removes a macro's database row and Gitea reference, but does not delete
   its built image from the in-cluster registry — that would need a
@@ -775,11 +849,32 @@ Frontend changes are currently verified manually against the running app.
   context and version history, it was never meant to replace the
   infra-level GitOps loop. See
   [005-gitea-artifact-mirror.md](docs/decisions/005-gitea-artifact-mirror.md).
-- **Single hardcoded admin user**, no user store, no roles/permissions, no
-  refresh tokens, no login rate limiting. See
-  [M4-jwt-auth.md](docs/decisions/M4-jwt-auth.md).
+- **A cluster recreate still loses everything**, even though
+  MinIO/Vault/Gitea/the registry/`backend-api` are all PVC-backed now —
+  those PVCs use k3d's `local-path` storage class, which stores data on
+  the node container's own filesystem, and `k3d cluster delete` deletes
+  the node itself. Persistence protects against a pod restart, not
+  against deleting the cluster. Re-running `scripts/bootstrap.sh` after a
+  recreate rebuilds everything from scratch (a fresh Vault, fresh
+  credentials, macros need rebuilding) — see
+  [docs/RUNBOOK.md](docs/RUNBOOK.md)'s "Recover a stranded k3d cluster."
+- **A single shared Gitea account, and one password shared across two
+  systems** (the platform admin login and Gitea's own login) — both
+  deliberate simplifications for a single-operator internal tool, not
+  oversights. See
+  [018-bootstrap-script-simplifications.md](docs/decisions/018-bootstrap-script-simplifications.md)
+  for the reasoning behind each and the conditions under which they
+  should be revisited.
+- **No granular permissions beyond `admin`/`employee`**, no self-service
+  registration (accounts are admin-managed only), no refresh tokens, no
+  login rate limiting. See
+  [013-per-user-accounts.md](docs/decisions/013-per-user-accounts.md).
 - **No observability** (Prometheus/Grafana) — out of scope for the
-  current production-hardening phase (see below), not just M6 anymore.
+  current production-hardening phase, not on the roadmap yet.
+- **No high availability** — a single-instance Macro Operator/backend-api,
+  no multi-node scaling. Out of scope: the current mission is making the
+  existing single-instance platform solid for real daily use, not scaling
+  it horizontally.
 - **No OSS/BSS integration, and none planned.** The originally-scoped M7
   (NetCracker/NFMS) was cancelled outright at the project's interfaces
   meeting with the supervisor — another team now owns that work. This

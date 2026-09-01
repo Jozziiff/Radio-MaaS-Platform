@@ -5,8 +5,9 @@ plan](../superpowers/plans/2026-08-31-external-network-reachability.md)'s
 final task — the actual `k3d cluster delete && create` recreate, full
 re-bootstrap, and live verification that a real browser on this machine's own
 LAN address (not `localhost`, not a pod, not `kubectl port-forward`) can
-reach the platform. Executed only after explicit, separate user approval, per
-[015](015-network-reachability-checkpoint.md)'s gate and
+reach the platform. Executed only after explicit, separate user approval (the
+plan's own final task was gated on this specifically, since a cluster
+recreate is genuinely destructive) and
 [016](016-pre-recreate-storage-investigation-and-backup.md)'s pre-recreate
 backup.
 

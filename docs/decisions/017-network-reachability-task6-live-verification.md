@@ -126,21 +126,21 @@ through Traefik's now-published ports 80/443, with **no port-forward and no
   other than `localhost`, which is what a colleague's browser would actually
   send.
 
-**Not verified: a second physical machine on the same network.** No second
-machine was available in this execution environment. Everything that can be
-checked from this machine (the binding is `0.0.0.0`, not `127.0.0.1`; the LAN
-IP responds identically to `localhost`) points at this working from another
-machine too, but the plan's own final checklist item — "repeat the check from
-a second machine" — genuinely needs a human on this project's actual office
-network to confirm. Flagged here rather than claimed as done.
+**Second physical machine — confirmed working by the user directly.** No
+second machine was available in this execution environment, so this check
+was left to the user, per the plan's own final checklist item. Confirmed
+afterward: reachable and working from another machine on the same network —
+the actual goal the whole plan existed for, verified by a real colleague-
+equivalent client, not inferred from this machine's own binding behavior.
 
 ## Outcome
 
 Storage did not survive the recreate, as [016](016-pre-recreate-storage-investigation-and-backup.md)
 predicted — a fresh `registry.db` (no execution history preserved; the old
 one is backup-only, not restored, since a clean re-bootstrap covers every
-account/macro/credential a fresh cluster needs). Every other piece of M7's
-"real network reachability" priority (CLAUDE.md) is now live and verified:
-the collapsed frontend+backend image, the SPA fallback, the host-agnostic
-Traefik Ingress, and genuine reachability from this machine's real network
+account/macro/credential a fresh cluster needs). Every piece of M7's "real
+network reachability" priority (CLAUDE.md) is now live and verified,
+including from a second machine on the network: the collapsed
+frontend+backend image, the SPA fallback, the host-agnostic Traefik Ingress,
+and genuine reachability from this machine's real network
 address rather than only `localhost`/`kubectl port-forward`.

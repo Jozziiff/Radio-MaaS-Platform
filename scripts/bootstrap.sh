@@ -351,6 +351,83 @@ EOF
   log "Registry credentials created."
 }
 
+# Confirmed live against this project's real deployed Gitea (see
+# docs/superpowers/specs/2026-09-01-bootstrap-script-design.md's research):
+# `gitea admin user create --admin --access-token ...` creates the account
+# and mints a scoped token in one command, no browser needed.
+ensure_gitea_account() {
+  log "Checking Gitea account 'macros'..."
+  local gitea_pod
+  gitea_pod="$(kubectl get pods -l app=gitea -o jsonpath='{.items[0].metadata.name}')"
+
+  local account_exists=false
+  kubectl exec "$gitea_pod" -- su git -c "gitea admin user list" 2>/dev/null | grep -qw macros && account_exists=true
+
+  # Own port-forward: same self-contained-per-function pattern
+  # ensure_registry_credentials() established, after Vault-connectivity
+  # bugs surfaced from relying on another function's already-torn-down
+  # port-forward.
+  local pf_pid
+  kubectl port-forward svc/vault 8200:8200 &>/tmp/bootstrap-vault-pf-3.log &
+  pf_pid=$!
+  sleep 2
+  export VAULT_ADDR="http://localhost:8200"
+  export VAULT_TOKEN="$ROOT_TOKEN"
+
+  local token_in_vault=false
+  vault kv get secret/gitea &>/dev/null && token_in_vault=true
+
+  if $account_exists && $token_in_vault; then
+    log "Gitea 'macros' account and token already set up -- skipping."
+    kill "$pf_pid" 2>/dev/null || true
+    return 0
+  fi
+
+  if $account_exists && ! $token_in_vault; then
+    kill "$pf_pid" 2>/dev/null || true
+    fail "$(cat <<EOF
+Gitea account 'macros' exists but no token is recorded in Vault. Gitea
+cannot re-display an existing token's value, so this script will not guess
+whether generating a new one is safe. Generate one manually:
+
+  kubectl exec $gitea_pod -- su git -c "gitea admin user generate-access-token -u macros -t radio-maas-backend --scopes write:repository,write:user,read:repository,read:user"
+
+then seed it:
+
+  vault kv put secret/gitea token=<the printed token>
+
+and re-run this script.
+EOF
+)"
+  fi
+
+  log "Creating Gitea account 'macros'..."
+  local create_output
+  create_output="$(kubectl exec "$gitea_pod" -- su git -c \
+    "gitea admin user create --username macros --password '$ADMIN_PW' --email macros@radio-maas.local --admin --access-token --access-token-name radio-maas-backend --access-token-scopes 'write:repository,write:user,read:repository,read:user'")"
+
+  local gitea_token
+  gitea_token="$(echo "$create_output" | grep -oP '(?<=successfully created\.\.\. )\S+' || true)"
+  if [ -z "$gitea_token" ]; then
+    kill "$pf_pid" 2>/dev/null || true
+    fail "Could not parse the access token from Gitea's create output:
+$create_output"
+  fi
+
+  # Binary-safe write (printf, not echo) -- a text-mode write here left a
+  # trailing \r in a prior live run that corrupted an HTTP header
+  # downstream (see docs/decisions/017).
+  printf '%s' "$gitea_token" > /tmp/bootstrap-gitea-token.tmp
+  kubectl cp /tmp/bootstrap-gitea-token.tmp "default/$gitea_pod:/tmp/bootstrap-gitea-token.tmp"
+  kubectl exec deploy/vault -c vault -- sh -c \
+    "export VAULT_ADDR=http://127.0.0.1:8200; export VAULT_TOKEN=$ROOT_TOKEN; vault kv put secret/gitea token=\$(cat /tmp/bootstrap-gitea-token.tmp)"
+  kubectl exec "$gitea_pod" -- rm -f /tmp/bootstrap-gitea-token.tmp
+  rm -f /tmp/bootstrap-gitea-token.tmp
+
+  kill "$pf_pid" 2>/dev/null || true
+  log "Gitea account and token created."
+}
+
 main() {
   preflight
   preflight_registry_auth
@@ -360,7 +437,8 @@ main() {
   ensure_minio_buckets
   ensure_vault
   ensure_registry_credentials
-  log "Registry credentials complete. (Remaining phases added in later tasks.)"
+  ensure_gitea_account
+  log "Gitea account setup complete. (Remaining phases added in later tasks.)"
 }
 
 main "$@"

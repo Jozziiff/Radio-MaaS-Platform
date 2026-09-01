@@ -38,7 +38,7 @@ export default function Sidebar({ page, onNavigate, giteaLink, className = "" })
         <img
           src="/Orange-logo.png"
           alt="Orange"
-          className="h-7 w-7 shrink-0 rounded-lg object-cover"
+          className="h-7 w-7 shrink-0 object-contain"
         />
         <span className="font-mono text-sm font-medium tracking-tight text-signal-100">
           radio-maas

@@ -17,7 +17,7 @@ export default function AboutPage({ page, onNavigate }) {
       <main className="mx-auto max-w-2xl px-8 pb-10 space-y-4">
         <Card className="p-8">
           <div className="flex items-center gap-3">
-            <img src="/Orange-logo.png" alt="Orange" className="h-8 w-8 rounded object-cover" />
+            <img src="/Orange-logo.png" alt="Orange" className="h-8 w-8 object-contain" />
             <h2 className="font-mono text-base font-medium text-signal-100">radio-maas</h2>
           </div>
           <p className="mt-4 text-sm leading-relaxed text-signal-300">

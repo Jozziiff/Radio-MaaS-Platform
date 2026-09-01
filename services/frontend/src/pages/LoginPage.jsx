@@ -33,7 +33,7 @@ export default function LoginPage() {
           <img
             src="/Orange-logo.png"
             alt="Orange"
-            className="mx-auto mb-4 h-11 w-11 rounded-full object-cover shadow-[0_0_24px_-6px_var(--color-amber-500)]"
+            className="mx-auto mb-4 h-14 w-14 object-contain drop-shadow-[0_0_18px_rgba(245,165,36,0.45)]"
           />
           <h1 className="font-mono text-lg font-medium tracking-tight text-signal-100">
             radio-maas

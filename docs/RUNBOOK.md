@@ -181,6 +181,50 @@ docker run --rm --entrypoint sh minio/mc -c "
 
 ## Common recovery actions
 
+**Reset the admin password if it's been lost** — no login required, no
+new endpoint needed. `scripts/bootstrap.sh`'s own password-setting step
+(`set_admin_password()`) only works once: it logs in with the
+hardcoded pre-M7 default (`devpassword123`) to authenticate the change,
+so once a real password has ever been set, re-running the script can't
+touch it again (see [013](decisions/013-per-user-accounts.md) — this is
+by design, not a gap: the script has no way to know an unknown current
+password, and guessing would be worse). This writes the new password
+directly into `backend-api`'s own SQLite database instead, using the
+exact same `passlib`/bcrypt hashing the app itself uses (`auth.py`'s
+`hash_password()`, imported and run from inside the pod so there's no
+risk of a different hash format the app can't verify against later):
+
+```bash
+kubectl exec deploy/backend-api -- python -c "
+import sys
+sys.path.insert(0, '/app')
+from auth import hash_password
+import sqlite3, os
+
+new_password = 'REPLACE_ME'  # at least 12 characters, matches this project's own minimum
+password_hash = hash_password(new_password)
+
+db_path = os.environ.get('REGISTRY_DB_PATH', '/app/registry.db')
+conn = sqlite3.connect(db_path)
+conn.execute('UPDATE users SET password_hash = ? WHERE username = ?', (password_hash, 'admin'))
+conn.commit()
+print('rows changed:', conn.total_changes)
+conn.close()
+"
+```
+
+Expect `rows changed: 1`. If it prints `0`, the `admin` username row
+doesn't exist under that exact name — check `kubectl exec
+deploy/backend-api -- python -c "import sqlite3,os; conn =
+sqlite3.connect(os.environ.get('REGISTRY_DB_PATH','/app/registry.db'));
+print(conn.execute('SELECT username, role FROM users').fetchall())"` to
+see what's actually in the table. No pod restart needed afterward —
+this only changes a database row, not anything `backend-api` cached at
+its own startup (unlike the Vault-sourced secrets below, which do need
+one). Verified live: a full `curl -X POST .../auth/login` with the new
+password against a real cluster returns a genuine access token right
+after running this.
+
 **Re-seed Vault's secrets** (one-time per fresh Vault instance as of
 M7's raft/auto-unseal work — not needed on an ordinary pod restart
 anymore, since Vault's data now survives that. See

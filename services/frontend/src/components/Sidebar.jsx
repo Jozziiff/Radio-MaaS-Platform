@@ -31,7 +31,7 @@ export default function Sidebar({ page, onNavigate, giteaLink, className = "" })
 
   return (
     <aside
-      className={`flex h-screen w-56 shrink-0 flex-col border-r border-signal-700 bg-signal-900 px-4 py-5 ${className}`}
+      className={`sticky top-0 flex h-screen w-56 shrink-0 flex-col self-start overflow-y-auto border-r border-signal-700 bg-signal-900 px-4 py-5 ${className}`}
     >
 
       <div className="flex items-center gap-2 px-2">
